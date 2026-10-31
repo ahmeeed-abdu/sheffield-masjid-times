@@ -63,6 +63,38 @@ const DIRECTORY = [
     "area": "Pitsmoor",
     "address": "18 Kirk St, Sheffield S4 7JX",
     "timetable_url": "https://masjidsunnahsheffield.co.uk/"
+  },
+  {
+    "id": "baitul",
+    "name_ar": "مسجد بيت المكرم",
+    "name_en": "Baitul Mukarram Jame Masjid",
+    "area": "Highfield",
+    "address": "358 London Rd, Sheffield S2 4NB",
+    "timetable_url": "https://www.baitulmukarramjamemasjid.com/"
+  },
+  {
+    "id": "makki",
+    "name_ar": "مسجد مكي",
+    "name_en": "Makki Mosque Sheffield",
+    "area": "Heeley",
+    "address": "Plantation Rd, Sheffield S8 9TH",
+    "timetable_url": "https://masjidbox.com/prayer-times/makki"
+  },
+  {
+    "id": "quba",
+    "name_ar": "مسجد قباء ومركز التعليم",
+    "name_en": "Masjid Quba Education Centre (MQEC)",
+    "area": "Attercliffe",
+    "address": "120 Worksop Rd, Sheffield S9 3TN",
+    "timetable_url": "https://www.yorkshire.com/sheffield/community/mosques/masjid-quba-education-centre-mqec"
+  },
+  {
+    "id": "umar",
+    "name_ar": "مسجد عمر",
+    "name_en": "Masjid Umar (YMA Sheffield)",
+    "area": "Burngreave",
+    "address": "306 Barnsley Rd, Sheffield S4 7AH",
+    "timetable_url": "https://www.ymasheffield.org/prayer-timetable"
   }
 ];
 const OFFLINE_MOSQUES = DIRECTORY.map(m => ({...m,adhan:EMPTY(),iqamah:EMPTY(),status:'needs_review',note:'المصدر الرسمي متاح عبر الرابط. بيانات النشر غير متوفرة.',source_date:null,checked_at:null}));
@@ -115,7 +147,7 @@ function statusHtml(m){
   return `<span class="status-badge ${s[1]}" title="${escapeHtml(m.note||'')}">${s[0]}</span>`;
 }
 function isThirdParty(m){return m.source_type==='third_party_dated_listing';}
-function sourceLabel(m){return isThirdParty(m)?'دليل مستقل (ليس المسجد) ↗':'صفحة المواقيت ↗';}
+function sourceLabel(m){return isThirdParty(m)?'دليل مستقل (ليس المسجد) ↗':m.source_type==='directory_listing'?'دليل المسجد (دون جدول) ↗':'صفحة المواقيت ↗';}
 function sourceNote(m){
   const checked=m.checked_at||m.updated_at;
   const parts=[m.note,m.source_date?`تاريخ الجدول: ${m.source_date}`:null,checked?`آخر فحص: ${clockFromISO(checked)}`:null];
@@ -231,7 +263,7 @@ async function refreshPublishedData(){
     const body=await response.json();
     if(body.demo===true || body.timezone!=='Europe/London' || !Array.isArray(body.mosques) ||
        !/^\d{4}-\d\d-\d\d$/.test(body.date || '') || !body.generated_at || body.mosques.length>250) throw new Error('Invalid data');
-    // Restrict display to the seven selected Sheffield mosques, in chosen order.
+    // Restrict display to the eleven selected Sheffield mosques, in chosen order.
     // The fallback rows remain visible if backend data has not yet caught up.
     const records = new Map(body.mosques.map(m => [m.id,m]));
     body.mosques = DIRECTORY.map(m => {
