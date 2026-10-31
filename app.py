@@ -58,7 +58,7 @@ MOSQUES = [{'id': 'huda',
   'address': '24 Wolseley Rd, Sheffield S8 0ZU',
   'website': 'https://www.madinamasjid.org.uk/',
   'timetable_url': 'https://mawaqit.net/en/madina-masjid-sheffield-sheffield-s8-0zu-united-kingdom',
-  'source_type': 'dynamic',
+  'source_type': 'mawaqit_link_only',
   'parser': None},
  {'id': 'risalah',
   'name_ar': 'مسجد الرسالة',
@@ -461,65 +461,178 @@ def _parse_public_clock(segment: str) -> str | None:
 
 
 def parse_grand_masjidbox(html: str, target: date) -> tuple[dict, dict]:
-    """Read a dated publicly visible Sheffield Grand Mosque Masjidbox page.
+    """Parse *complete prayer cards*, never countdown clocks or Jumuah rows.
 
-    Masjidbox has no public API. This parser uses only public page HTML and
-    fails closed if GitHub receives a JS shell, wrong mosque, wrong date,
-    different locale, or incomplete Jamaat times. No private endpoints.
+    The earlier regex began at the first mention of 'Dhuhr' in a countdown
+    header, sometimes collecting the Fajr time as Dhuhr. That produced the
+    'Prayer starts are not in chronological order' error reported by GitHub.
+    A valid card must be: <prayer> <clock> Iqamah <clock>.
     """
-    soup = BeautifulSoup(html, 'html.parser')
-    for tag in soup(['script', 'style', 'noscript', 'svg']):
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["script", "style", "noscript", "svg"]):
         tag.decompose()
-    text = re.sub(r'\s+', ' ', soup.get_text(' ', strip=True))
-    if not re.search(r'\bSheffield Grand Mosque\b', text, re.I):
-        raise ValueError('Masjidbox mosque identity is not Sheffield Grand Mosque')
-    if not re.search(r'Grimesthorpe', text, re.I):
-        raise ValueError('Masjidbox mosque address could not be confirmed')
-    # Require a readable date printed near the PAGE HEADER; do not accept an
-    # unrelated date in a news story, embedded script or previous timetable.
-    header_text = text[:500]
-    match = re.search(
-        r'\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\s+'
-        r'(?P<month>January|February|March|April|May|June|July|August|September|October|November|December)'
-        r'\s+(?P<day>\d{1,2}),?\s+(?P<year>20\d{2})\b',
-        header_text, re.I,
+    text = re.sub(r"\s+", " ", soup.get_text(" ", strip=True))
+    if not re.search(r"\bSheffield Grand Mosque\b", text, re.I):
+        raise ValueError("Masjidbox mosque identity is not Sheffield Grand Mosque")
+    if not re.search(r"\bGrimesthorpe\b", text, re.I):
+        raise ValueError("Masjidbox mosque address could not be confirmed")
+    header = text[:550]
+    matched = re.search(
+        r"\b(?P<weekday>Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\s+"
+        r"(?P<month>January|February|March|April|May|June|July|August|September|October|November|December)"
+        r"\s+(?P<day>\d{1,2}),?\s+(?P<year>20\d{2})\b", header, re.I,
     )
-    if not match:
-        raise ValueError('Masjidbox public page has no visible English date')
-    date_string = f"{match.group('month').title()} {int(match.group('day'))} {match.group('year')}"
-    page_date = datetime.strptime(date_string, '%B %d %Y').date()
-    if page_date != target:
-        raise ValueError(f'Masjidbox page date {page_date} does not match {target}')
-    # Re-confirm the printed weekday, preventing a malformed header from
-    # silently being accepted just because day/month/year look plausible.
-    weekday = match.group(0).split(',', 1)[0].split()[0].lower()
-    if weekday != target.strftime('%A').lower():
-        raise ValueError('Masjidbox page weekday disagrees with its date')
-    prayer_aliases = [
-        ('fajr', r'Fajr'),
-        ('dhuhr', r'(?:Dhuhr|Zuhr|Dhuhur)'),
-        ('asr', r'Asr'),
-        ('maghrib', r'Maghrib'),
-        ('isha', r'(?:Isha|Ishaa)'),
-    ]
+    if not matched:
+        raise ValueError("Masjidbox public page has no visible English date")
+    published = datetime.strptime(
+        f"{matched['day']} {matched['month']} {matched['year']}", "%d %B %Y"
+    ).date()
+    if published != target:
+        raise ValueError(f"Masjidbox page date {published} does not match {target}")
+    if matched['weekday'].lower() != target.strftime('%A').lower():
+        raise ValueError("Masjidbox page weekday disagrees with its date")
+
+    # A prayer card is two adjacent clocks separated by the Iqamah label.
+    # A countdown like 'The prayer of Dhuhr is in 04 Hours ...' cannot match.
+    clock = r"(?:[01]?\d|2[0-3])(?:\s*[:.]\s*|\s+)[0-5]\d(?:\s*[AP]\.?M\.?)?"
+    aliases = {"fajr": "Fajr", "dhuhr": "(?:Dhuhr|Zuhr|Dhuhur)",
+               "asr": "Asr", "maghrib": "Maghrib", "isha": "(?:Isha|Ishaa)"}
     adhan, iqamah = _empty(), _empty()
-    # Constrain matching to the visible day's prayer card. Shuruq, Jumuah
-    # and countdown messages cannot be mistaken for daily Jamaat entries.
-    for prayer, alias in prayer_aliases:
-        search = re.search(
-            rf'\b{alias}\b(?P<begin>.*?)\bIqamah\b(?P<jam>.*?)'
-            rf'(?=\b(?:Fajr|Shuruq|Dhuhr|Zuhr|Dhuhur|Asr|Maghrib|Isha|Ishaa|Jumuah)\b|$)',
-            text, re.I | re.S,
-        )
-        if not search:
-            continue
-        begins = _parse_public_clock(search.group('begin'))
-        jamaat = _parse_public_clock(search.group('jam'))
-        if begins and jamaat:
-            adhan[prayer], iqamah[prayer] = begins, jamaat
+    for prayer, alias in aliases.items():
+        # Do not allow arbitrary text between the prayer name, time, and iqamah.
+        pattern = rf"\b{alias}\b\s+(?P<start>{clock})\s+Iqamah\s+(?P<jam>{clock})(?=\s|$)"
+        rows = list(re.finditer(pattern, text, re.I))
+        if len(rows) != 1:
+            continue  # Multiple conflicting matches also fail closed.
+        begins = _parse_public_clock(rows[0]['start'])
+        congregation = _parse_public_clock(rows[0]['jam'])
+        if begins and congregation:
+            adhan[prayer], iqamah[prayer] = begins, congregation
     if sum(bool(iqamah[p]) for p in PRAYERS) < 4:
-        raise ValueError('Masjidbox public page does not expose at least four dated Jamaat rows')
+        raise ValueError("Masjidbox public page does not expose four complete dated Jamaat cards")
     return adhan, iqamah
+
+
+# Independent directories are optional date-checked fallbacks only. They are
+# *not* official mosque confirmations or substitutes for inaccessible APIs.
+INDEPENDENT_SOURCES = {
+    "grand": (
+        ("faseela", "https://www.faseela.org/sheffield/sheffield-grand-mosque-emaan"),
+        ("city_listing", "https://prayer-times.co.uk/sheffield"),
+    ),
+    "madina": (
+        ("faseela", "https://www.faseela.org/sheffield/madina-masjid"),
+        ("city_listing", "https://prayer-times.co.uk/sheffield"),
+    ),
+}
+
+
+def parse_faseela_dated(html: str, target: date, mosque_id: str) -> tuple[dict, dict]:
+    """Require mosque identity and date, then read only Time/Jamaat columns."""
+    if mosque_id not in ("grand", "madina"):
+        raise ValueError("No independently tracked Faseela mosque profile")
+    text = _flat_html(html)
+    identity = r"Sheffield Grand Mosque" if mosque_id == "grand" else r"Madina Masjid"
+    if not re.search(identity, text[:1500], re.I):
+        raise ValueError("Faseela mosque identity differs from selected Sheffield mosque")
+    date_marker = re.search(r"(?<!\d)(\d{2}/\d{2}/20\d{2})\s*\((Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\)", text[:1500], re.I)
+    if not date_marker:
+        raise ValueError("Faseela timetable has no unambiguous dated heading")
+    published = datetime.strptime(date_marker[1], "%d/%m/%Y").date()
+    if published != target or date_marker[2].lower() != target.strftime('%A').lower():
+        raise ValueError(f"Faseela timetable date {published} differs from {target}")
+    # Never read 'Tomorrow's Jamaat' as today's Jamaat.
+    region = text[date_marker.end():date_marker.end()+950]
+    if not re.search(r"\bPrayer\s+Time\s+Jamaat\b", region, re.I):
+        raise ValueError("Faseela current prayer table headings missing")
+    adhan, iqamah = _empty(), _empty()
+    for prayer, label in {"fajr": "Fajr", "dhuhr": "(?:Zuhr|Dhuhr)",
+                          "asr": "Asr", "maghrib": "Maghrib", "isha": "Isha"}.items():
+        match = re.search(rf"\b{label}\b\s+(\d{{1,2}}:\d{{2}})\s+(\d{{1,2}}:\d{{2}})(?=\s|$)", region, re.I)
+        if match:
+            adhan[prayer], iqamah[prayer] = _clock(match[1]), _clock(match[2])
+    if sum(bool(x) for x in iqamah.values()) < 4:
+        raise ValueError("Faseela has fewer than four dated Jamaat times")
+    return adhan, iqamah
+
+
+def parse_city_mosque_jamaat(html: str, target: date, mosque_id: str) -> tuple[dict, dict]:
+    """Use ONLY the dated mosque-specific Jamaat table, not city starts.
+
+    The city page also lists calculated astronomical starts. The two are
+    separate sections and must never be conflated.
+    """
+    text = _flat_html(html)
+    label = {"grand": "Sheffield Grand Mosque",
+             "madina": "Madina Masjid (Wolseley Road)"}.get(mosque_id)
+    if not label:
+        raise ValueError("No matching Sheffield congregation directory entry")
+    heading = re.search(r"Jama[’'`]?ah\s+times\s+today\s+at\s+Sheffield\s+mosques", text, re.I)
+    if not heading:
+        raise ValueError("City's mosque congregation table is missing")
+    region = text[heading.end():heading.end()+2400]
+    date_label = (rf"{re.escape(target.strftime('%A'))},?\s+0?{target.day}"
+                  rf"(?:st|nd|rd|th)?\s+{re.escape(target.strftime('%B'))}\s+{target.year}")
+    if not re.search(rf"Congregation\s+\(iqamah\)\s+times\s+for\s+{date_label}", region, re.I):
+        raise ValueError("City listing is not dated for Sheffield today")
+    # Do not match directory cards or the general city astronomical timetable.
+    region = re.split(r"\bMosques in Sheffield\b", region, maxsplit=1, flags=re.I)[0]
+    clock = r"([01]?\d|2[0-3]):([0-5]\d)"
+    stamp = r"((?:[01]?\d|2[0-3]):[0-5]\d)"
+    pat = re.escape(label) + r"\s+" + r"\s+".join([stamp] * 5) + r"(?=\s|$)"
+    found = re.search(pat, region, re.I)
+    if not found:
+        raise ValueError("City listing has no complete mosque-specific Jamaat row")
+    iqamah = {prayer: _clock(raw) for prayer, raw in zip(PRAYERS, found.groups())}
+    return _empty(), iqamah
+
+
+def validate_independent_times(adhan: dict, iqamah: dict) -> None:
+    """Check today's third-party values without inventing adhan start times."""
+    if sum(bool(t) for t in iqamah.values()) < 4:
+        raise ValueError("Independent listing has fewer than four Jamaat times")
+    for prayer in PRAYERS:
+        start, jam = adhan.get(prayer), iqamah.get(prayer)
+        if start and _clock(start) != start:
+            raise ValueError(f"Bad independent prayer start: {prayer}")
+        if jam and _clock(jam) != jam:
+            raise ValueError(f"Bad independent Jamaat: {prayer}")
+        if start and jam and _minutes(jam) < _minutes(start):
+            raise ValueError(f"Independent Jamaat before prayer starts: {prayer}")
+    for group in (adhan, iqamah):
+        times = [_minutes(group[p]) for p in PRAYERS if group.get(p)]
+        if any(b <= a for a, b in zip(times, times[1:])):
+            raise ValueError("Independent prayer times are out of sequence")
+
+
+def _independent_or_manual(row: dict, mosque: dict, target: date) -> dict:
+    """Prefer an administrator-confirmed row over independent directories."""
+    failures = []
+    for provider, url in INDEPENDENT_SOURCES.get(mosque['id'], ()):
+        try:
+            html = _official_html(url)
+            if provider == 'faseela':
+                adhan, iqamah = parse_faseela_dated(html, target, mosque['id'])
+            else:
+                adhan, iqamah = parse_city_mosque_jamaat(html, target, mosque['id'])
+            validate_independent_times(adhan, iqamah)
+            provisional = _initial_record(mosque)
+            provisional.update(
+                adhan=adhan, iqamah=iqamah,
+                status=('third_party_dated' if all(iqamah.values()) else 'third_party_partial'),
+                source_date=target.isoformat(), checked_at=datetime.now(TZ).isoformat(timespec='seconds'),
+                updated_at=datetime.now(TZ).isoformat(timespec='seconds'),
+                source_type='third_party_dated_listing', timetable_url=url,
+                note='مواعيد مؤرخة من دليل مستقل وليست تأكيدًا من إدارة المسجد؛ يرجى مراجعة المسجد قبل الاعتماد عليها.',
+                provenance='Independent, dated third-party listing; not confirmed by mosque',
+            )
+            return _manual_or_row(provisional, mosque, target)
+        except (requests.RequestException, ValueError, KeyError, RuntimeError) as exc:
+            failures.append(f'{provider}: {type(exc).__name__}: {str(exc)[:92]}')
+    if failures:
+        prior = row.get('diagnostic', '')
+        row['diagnostic'] = (prior + ' | Independent: ' + ' | '.join(failures))[:550]
+    return _manual_or_row(row, mosque, target)
 
 
 def validate_times(adhan: dict, iqamah: dict) -> None:
@@ -611,6 +724,8 @@ def _read_official(mosque: dict, target: date) -> dict:
         row["note"] = ("هذه الصفحة دليل غير رسمي، ولا تؤكد أوقات الإقامة؛ اطلب جدول الجماعة من المسجد."
                        if mosque["id"] == "risalah" else
                        "هذا المصدر غير مربوط آليًا بعد؛ تحقق من موقع المسجد أو جدوله الرسمي.")
+        if mosque["id"] in INDEPENDENT_SOURCES:
+            return _independent_or_manual(row, mosque, target)
         return _manual_or_row(row, mosque, target)
     row["checked_at"] = datetime.now(TZ).isoformat(timespec="seconds")
     if mosque["id"] == "sunnah":
@@ -678,6 +793,8 @@ def _read_official(mosque: dict, target: date) -> dict:
         # Safe, short diagnostic to help the site owner identify the real issue.
         # Visible only when examining data/mosques.json or the workflow logs.
         row["diagnostic"] = f"{type(exc).__name__}: {original_failure.replace(chr(10), ' ')[:180]}"
+    if mosque["id"] in INDEPENDENT_SOURCES and row["status"] not in ("updated", "partial"):
+        return _independent_or_manual(row, mosque, target)
     return _manual_or_row(row, mosque, target)
 
 

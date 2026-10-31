@@ -84,7 +84,7 @@ function freshPublication(){
   return Number.isFinite(published) && age >= -10*60*1000 && age <= MAX_DATA_AGE_MS;
 }
 const approvedRow = m => freshPublication() && m.source_date === state.payload.date &&
-  ['updated','partial'].includes(m.status);
+  ['updated','partial','manual_dated','manual_partial','third_party_dated','third_party_partial'].includes(m.status);
 const hasTime = m => Object.values(m.iqamah || {}).some(Boolean);
 const usableRow = m => approvedRow(m) && hasTime(m);
 const clockFromISO = v => {const d = new Date(v||'');return Number.isNaN(d.getTime()) ? '' : londonTime(d);};
@@ -101,15 +101,21 @@ function mapLink(m){return 'https://www.google.com/maps/search/?api=1&query='+en
 const statuses = {
   updated:['مواعيد مؤرخة اليوم','status-updated'],
   partial:['مواعيد جزئية اليوم','status-partial'],
+  manual_dated:['مؤكد من جدول مؤرخ','status-updated'],
+  manual_partial:['جدول مؤكد جزئيًا','status-partial'],
+  third_party_dated:['من دليل مستقل — تحقق','status-partial'],
+  third_party_partial:['دليل مستقل جزئي — تحقق','status-partial'],
   undated:['جدول غير مؤرخ','status-partial'],
   needs_review:['بحاجة للتحقق','status-needs_review'],
   not_connected:['قيد الربط','status-not_connected']
 };
 function statusHtml(m){
-  const s = !freshPublication() && ['updated','partial'].includes(m.status) ?
+  const s = !freshPublication() && ['updated','partial','manual_dated','manual_partial','third_party_dated','third_party_partial'].includes(m.status) ?
     ['البيانات قديمة','status-needs_review'] : (statuses[m.status]||statuses.not_connected);
   return `<span class="status-badge ${s[1]}" title="${escapeHtml(m.note||'')}">${s[0]}</span>`;
 }
+function isThirdParty(m){return m.source_type==='third_party_dated_listing';}
+function sourceLabel(m){return isThirdParty(m)?'دليل مستقل (ليس المسجد) ↗':'صفحة المواقيت ↗';}
 function sourceNote(m){
   const checked=m.checked_at||m.updated_at;
   const parts=[m.note,m.source_date?`تاريخ الجدول: ${m.source_date}`:null,checked?`آخر فحص: ${clockFromISO(checked)}`:null];
@@ -180,10 +186,10 @@ function renderBanner(){
 }
 function renderTable(list,prayers){
   $('table-head').innerHTML=`<tr><th>المسجد والمنطقة</th>${prayers.map(p=>`<th>${p.label}</th>`).join('')}<th>المصدر</th></tr>`;
-  $('table-body').innerHTML=list.map(m=>`<tr><td><div class="masjid-name"><strong>${escapeHtml(m.name_ar)}</strong><span>${escapeHtml(m.name_en)}</span></div><span class="masjid-area">⌖ ${escapeHtml(m.area)}</span></td>${prayers.map(p=>`<td class="${state.prayer!=='all'?'focus-cell':''}">${formatCell(m,p.key)}</td>`).join('')}<td class="status-cell">${statusHtml(m)}<a class="source-link" href="${escapeHtml(safeUrl(m.timetable_url))}" target="_blank" rel="noopener noreferrer">المصدر الرسمي ↗</a><a class="source-link" href="${escapeHtml(mapLink(m))}" target="_blank" rel="noopener noreferrer">الموقع ⌖</a><span class="source-small">${escapeHtml(sourceNote(m))}</span></td></tr>`).join('');
+  $('table-body').innerHTML=list.map(m=>`<tr><td><div class="masjid-name"><strong>${escapeHtml(m.name_ar)}</strong><span>${escapeHtml(m.name_en)}</span></div><span class="masjid-area">⌖ ${escapeHtml(m.area)}</span></td>${prayers.map(p=>`<td class="${state.prayer!=='all'?'focus-cell':''}">${formatCell(m,p.key)}</td>`).join('')}<td class="status-cell">${statusHtml(m)}<a class="source-link" href="${escapeHtml(safeUrl(m.timetable_url))}" target="_blank" rel="noopener noreferrer">${sourceLabel(m)}</a><a class="source-link" href="${escapeHtml(mapLink(m))}" target="_blank" rel="noopener noreferrer">الموقع ⌖</a><span class="source-small">${escapeHtml(sourceNote(m))}</span></td></tr>`).join('');
 }
 function renderMobile(list,prayers){
-  $('mobile-cards').innerHTML=list.map(m=>`<article class="masjid-card"><div class="masjid-card-head"><div><h3>${escapeHtml(m.name_ar)}</h3><div class="en-name">${escapeHtml(m.name_en)}</div><p class="area-name">⌖ ${escapeHtml(m.area)}</p></div>${statusHtml(m)}</div><div class="mobile-grid ${prayers.length===1?'focus-one':''}">${prayers.map(p=>`<div class="mobile-prayer ${state.prayer!=='all'?'is-focus':''}">${formatCell(m,p.key,true)}</div>`).join('')}</div><div class="card-footer"><div class="card-links"><a href="${escapeHtml(safeUrl(m.timetable_url))}" target="_blank" rel="noopener noreferrer">المصدر الرسمي ↗</a><a href="${escapeHtml(mapLink(m))}" target="_blank" rel="noopener noreferrer">الموقع ⌖</a></div><span class="source-small">${escapeHtml(m.source_type==='pdf'?'PDF':'موقع المسجد')}</span></div>${sourceNote(m)?`<p class="card-note">${escapeHtml(sourceNote(m))}</p>`:''}</article>`).join('');
+  $('mobile-cards').innerHTML=list.map(m=>`<article class="masjid-card"><div class="masjid-card-head"><div><h3>${escapeHtml(m.name_ar)}</h3><div class="en-name">${escapeHtml(m.name_en)}</div><p class="area-name">⌖ ${escapeHtml(m.area)}</p></div>${statusHtml(m)}</div><div class="mobile-grid ${prayers.length===1?'focus-one':''}">${prayers.map(p=>`<div class="mobile-prayer ${state.prayer!=='all'?'is-focus':''}">${formatCell(m,p.key,true)}</div>`).join('')}</div><div class="card-footer"><div class="card-links"><a href="${escapeHtml(safeUrl(m.timetable_url))}" target="_blank" rel="noopener noreferrer">${sourceLabel(m)}</a><a href="${escapeHtml(mapLink(m))}" target="_blank" rel="noopener noreferrer">الموقع ⌖</a></div><span class="source-small">${escapeHtml(isThirdParty(m)?'دليل مستقل':(m.source_type||'').startsWith('pdf')?'PDF رسمي':'موقع المسجد')}</span></div>${sourceNote(m)?`<p class="card-note">${escapeHtml(sourceNote(m))}</p>`:''}</article>`).join('');
 }
 function render(){
   renderSummary();renderBanner();
