@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+public/
+.site-preview/
+.pytest_cache/
+.DS_Store
