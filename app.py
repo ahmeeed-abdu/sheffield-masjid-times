@@ -12,6 +12,8 @@ from threading import Lock
 from typing import Callable
 from zoneinfo import ZoneInfo
 import copy
+import hashlib
+import json
 import logging
 import os
 import re
@@ -360,12 +362,56 @@ def _read_official(mosque: dict, target: date) -> dict:
                     row["note"] = "وقت بداية العصر المنشور غير صحيح (منتصف الليل)؛ أخفينا العصر وعرضنا بقية الأوقات المؤرخة."
         row["updated_at"] = row["checked_at"]  # Compatibility with older UI.
     except (requests.RequestException, ValueError, RuntimeError, KeyError) as exc:
-        LOG.warning("Unable to verify source %s: %s", mosque["id"], exc)
+        if mosque["id"] == "huda" and "HTTP 403" in str(exc):
+            try:
+                return _huda_pdf_fallback(mosque, target)
+            except (ValueError, KeyError, OSError, json.JSONDecodeError) as fallback_exc:
+                # The downloaded PDF has no year. A missing verified date is
+                # a normal safe failure, not permission to guess a schedule.
+                LOG.warning("Al-Huda PDF not confirmed: %s", fallback_exc)
+                original_failure = f"HTTP 403; PDF fallback unavailable: {fallback_exc}"
+            else:
+                original_failure = str(exc)
+        else:
+            original_failure = str(exc)
+        LOG.warning("Unable to verify source %s: %s", mosque["id"], original_failure)
         row["status"] = "needs_review"
         row["note"] = "تعذر تأكيد المواعيد بتاريخ اليوم؛ راجع موقع المسجد الرسمي."
         # Safe, short diagnostic to help the site owner identify the real issue.
         # Visible only when examining data/mosques.json or the workflow logs.
-        row["diagnostic"] = f"{type(exc).__name__}: {str(exc).replace(chr(10), ' ')[:180]}"
+        row["diagnostic"] = f"{type(exc).__name__}: {original_failure.replace(chr(10), ' ')[:180]}"
+    return row
+
+
+
+def _huda_pdf_fallback(mosque: dict, target: date) -> dict:
+    """Use an offline PDF row ONLY when independently verified for this date.
+
+    The supplied annual PDF has NO printed year and 2026 DST inconsistencies.
+    Never apply its month/day records to a new year automatically.
+    """
+    row = _initial_record(mosque)
+    row["checked_at"] = datetime.now(TZ).isoformat(timespec="seconds")
+    filename = ROOT / "al_huda_annual.json"
+    data = json.loads(filename.read_text(encoding="utf-8"))
+    verified = data.get("verified_dates", {}).get(target.isoformat())
+    if not verified:
+        raise ValueError("Al-Huda annual PDF does not state a year; today's date is not independently verified")
+    key = target.strftime("%d-%b")
+    day = data["rows"][key]
+    values = {"adhan": day["adhan"], "iqamah": day["iqamah"]}
+    digest = hashlib.sha256(json.dumps(values, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    if digest != verified["row_sha256"]:
+        raise ValueError("Al-Huda annual timetable row changed since date-specific verification")
+    validate_times(day["adhan"], day["iqamah"])
+    row["adhan"] = copy.deepcopy(day["adhan"])
+    row["iqamah"] = copy.deepcopy(day["iqamah"])
+    row["status"] = "updated"
+    row["source_date"] = target.isoformat()
+    row["updated_at"] = row["checked_at"]
+    row["timetable_url"] = data["source_url"]
+    row["source_type"] = "pdf_local_verified_date"
+    row["note"] = "These daily times match the mosque's dated official website. The saved annual PDF is used because the live request returned HTTP 403."
     return row
 
 
