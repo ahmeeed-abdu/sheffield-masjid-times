@@ -145,7 +145,57 @@ function safeUrl(url){
   try{const v=new URL(url); return ['https:','http:'].includes(v.protocol)?v.toString():'#';}
   catch{return '#';}
 }
-function mapLink(m){return 'https://www.google.com/maps/search/?api=1&query='+encodeURIComponent(m.address||m.name_en+' Sheffield');}
+// Google Maps Directions does not require an API key. Origin is deliberately
+// omitted: Maps asks for or detects the visitor's starting location itself.
+const DIRECTIONS_BY_ID = new Map(DIRECTORY.map(m => [m.id,m]));
+function directionsUrl(m){
+  const url=new URL('https://www.google.com/maps/dir/');
+  const destination=[m.name_en,m.address].filter(Boolean).join(', ');
+  url.searchParams.set('api','1');
+  url.searchParams.set('destination',destination);
+  url.searchParams.set('dir_action','navigate');
+  return url.toString();
+}
+const DIRECTIONS_ICON = '<svg class="directions-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 11 19-9-9 19-2-8-8-2Z"/><path d="M11 13 22 2"/></svg>';
+function directionsButton(m,mobile=false){
+  const name=escapeHtml(m.name_ar);
+  return `<button type="button" class="directions-button${mobile?' directions-button-mobile':''}" data-directions-id="${escapeHtml(m.id)}" aria-label="الاتجاهات إلى ${name} — Directions to ${escapeHtml(m.name_en)}" title="افتح مسار الوصول إلى ${name} في الخرائط">${DIRECTIONS_ICON}<span>${mobile?'الاتجاهات إلى المسجد':'الاتجاهات'}</span><span class="directions-chevron" aria-hidden="true">↗</span></button>`;
+}
+function onDirectionsClick(e){
+  const button=e.target.closest('button[data-directions-id]');
+  if(!button)return;
+  const mosque=DIRECTIONS_BY_ID.get(button.dataset.directionsId);
+  if(!mosque || !mosque.address)return;
+  // Use a user-initiated button click, not an anchor or an API key.
+  window.open(directionsUrl(mosque),'_blank','noopener,noreferrer');
+}
+function installDirectionsStyles(){
+  if(document.getElementById('sheffield-directions-style'))return;
+  const style=document.createElement('style');
+  style.id='sheffield-directions-style';
+  style.textContent=`
+    .directions-button{
+      display:inline-flex;align-items:center;justify-content:center;gap:8px;
+      min-height:38px;padding:9px 13px;border:1px solid #176d60;
+      border-radius:11px;color:#fff;background:linear-gradient(125deg,#0e4a46,#187863);
+      box-shadow:0 4px 12px rgba(16,74,65,.15);cursor:pointer;
+      font:800 12px/1.3 Tahoma,"Segoe UI",Arial,sans-serif;
+      white-space:nowrap;transition:box-shadow .18s ease,transform .18s ease,filter .18s ease;
+    }
+    .directions-button:hover{filter:brightness(1.08);transform:translateY(-1px);box-shadow:0 6px 15px rgba(16,74,65,.22)}
+    .directions-button:active{transform:translateY(0)}
+    .directions-button:focus-visible{outline:3px solid #77c59f;outline-offset:3px}
+    .directions-button .directions-icon{width:17px;height:17px;flex:none}
+    .directions-button .directions-chevron{opacity:.8;font:700 16px/1 Arial,sans-serif;transform:rotate(0)}
+    .masjid-table td:first-child .directions-button{margin-top:10px}
+    .masjid-card .directions-button-mobile{display:flex;width:100%;min-height:45px;gap:10px;font-size:13px;border-radius:12px}
+    .masjid-card .directions-row{margin:11px 0 0}
+    .masjid-card .card-links{flex-wrap:wrap}
+    @media (prefers-reduced-motion: reduce){.directions-button{transition:none}.directions-button:hover{transform:none}}
+  `;
+  document.head.appendChild(style);
+}
+
 const statuses = {
   updated:['مواعيد مؤرخة اليوم','status-updated'],
   partial:['مواعيد جزئية اليوم','status-partial'],
@@ -262,10 +312,10 @@ function pendingReason(m){
 }
 function renderTable(list,prayers){
   $('table-head').innerHTML=`<tr><th>المسجد والمنطقة</th>${prayers.map(p=>`<th>${p.label}</th>`).join('')}<th>المصدر</th></tr>`;
-  $('table-body').innerHTML=list.map(m=>`<tr><td><div class="masjid-name"><strong>${escapeHtml(m.name_ar)}</strong><span>${escapeHtml(m.name_en)}</span></div><span class="masjid-area">⌖ ${escapeHtml(m.area)}</span></td>${prayers.map(p=>`<td class="${state.prayer!=='all'?'focus-cell':''}">${formatCell(m,p.key)}</td>`).join('')}<td class="status-cell">${statusHtml(m)}<a class="source-link" href="${escapeHtml(safeUrl(m.timetable_url))}" target="_blank" rel="noopener noreferrer">${sourceLabel(m)}</a>${andalusOfficialLink(m)}<a class="source-link" href="${escapeHtml(mapLink(m))}" target="_blank" rel="noopener noreferrer">الموقع ⌖</a><span class="source-small">${escapeHtml(sourceNote(m))}</span></td></tr>`).join('');
+  $('table-body').innerHTML=list.map(m=>`<tr><td><div class="masjid-name"><strong>${escapeHtml(m.name_ar)}</strong><span>${escapeHtml(m.name_en)}</span></div><span class="masjid-area">⌖ ${escapeHtml(m.area)}</span><div class="directions-row">${directionsButton(m)}</div></td>${prayers.map(p=>`<td class="${state.prayer!=='all'?'focus-cell':''}">${formatCell(m,p.key)}</td>`).join('')}<td class="status-cell">${statusHtml(m)}<a class="source-link" href="${escapeHtml(safeUrl(m.timetable_url))}" target="_blank" rel="noopener noreferrer">${sourceLabel(m)}</a>${andalusOfficialLink(m)}<span class="source-small">${escapeHtml(sourceNote(m))}</span></td></tr>`).join('');
 }
 function renderMobile(list,prayers){
-  $('mobile-cards').innerHTML=list.map(m=>`<article class="masjid-card"><div class="masjid-card-head"><div><h3>${escapeHtml(m.name_ar)}</h3><div class="en-name">${escapeHtml(m.name_en)}</div><p class="area-name">⌖ ${escapeHtml(m.area)}</p></div>${statusHtml(m)}</div><div class="mobile-grid ${prayers.length===1?'focus-one':''}">${prayers.map(p=>`<div class="mobile-prayer ${state.prayer!=='all'?'is-focus':''}">${formatCell(m,p.key,true)}</div>`).join('')}</div><div class="card-footer"><div class="card-links"><a href="${escapeHtml(safeUrl(m.timetable_url))}" target="_blank" rel="noopener noreferrer">${sourceLabel(m)}</a>${andalusOfficialLink(m,true)}<a href="${escapeHtml(mapLink(m))}" target="_blank" rel="noopener noreferrer">الموقع ⌖</a></div><span class="source-small">${escapeHtml(isThirdParty(m)?'دليل مستقل':(m.source_type||'').startsWith('pdf')?'PDF رسمي':'موقع المسجد')}</span></div>${sourceNote(m)?`<p class="card-note">${escapeHtml(sourceNote(m))}</p>`:''}</article>`).join('');
+  $('mobile-cards').innerHTML=list.map(m=>`<article class="masjid-card"><div class="masjid-card-head"><div><h3>${escapeHtml(m.name_ar)}</h3><div class="en-name">${escapeHtml(m.name_en)}</div><p class="area-name">⌖ ${escapeHtml(m.area)}</p></div>${statusHtml(m)}</div><div class="mobile-grid ${prayers.length===1?'focus-one':''}">${prayers.map(p=>`<div class="mobile-prayer ${state.prayer!=='all'?'is-focus':''}">${formatCell(m,p.key,true)}</div>`).join('')}</div><div class="card-footer"><div class="card-links"><a href="${escapeHtml(safeUrl(m.timetable_url))}" target="_blank" rel="noopener noreferrer">${sourceLabel(m)}</a>${andalusOfficialLink(m,true)}</div><span class="source-small">${escapeHtml(isThirdParty(m)?'دليل مستقل':(m.source_type||'').startsWith('pdf')?'PDF رسمي':'موقع المسجد')}</span></div><div class="directions-row">${directionsButton(m,true)}</div>${sourceNote(m)?`<p class="card-note">${escapeHtml(sourceNote(m))}</p>`:''}</article>`).join('');
 }
 function render(){
   renderSummary();renderBanner();
@@ -294,6 +344,9 @@ function bindControls(){
     render();
   });
   $('refresh-times').addEventListener('click',refreshPublishedData);
+  // Event delegation keeps buttons working after search, filtering and refresh.
+  $('table-body').addEventListener('click',onDirectionsClick);
+  $('mobile-cards').addEventListener('click',onDirectionsClick);
 }
 async function refreshPublishedData(){
   const button=$('refresh-times');
@@ -328,6 +381,7 @@ async function refreshPublishedData(){
   }
 }
 function boot(){
+  installDirectionsStyles();
   bindControls();updateClock();
   refreshPublishedData();
   setInterval(updateClock,60*1000);
