@@ -17,6 +17,8 @@ import json
 import logging
 import os
 import re
+import shutil
+import subprocess
 import unicodedata
 from urllib.parse import urljoin, urlsplit
 
@@ -979,7 +981,152 @@ def _initial_record(mosque: dict) -> dict:
     return row
 
 
+# Official Andalus daily widget is populated by client-side JavaScript. A
+# normal requests.get() response contains "Loading", even when the public site
+# shows five complete prayer and Iqamah rows in a real browser.
+ANDALUS_OFFICIAL_URL = "https://www.andalus.org.uk/"
+
+
+def parse_andalus_rendered(html: str, target: date) -> tuple[dict, dict]:
+    """Accept only five complete pairs from the CURRENT dated official widget.
+
+    This parser intentionally has no fallback to city-wide calculated prayer
+    times and never guesses the year from a historic PDF or stale daily row.
+    """
+    text = _flat_html(html)
+    header = re.search(r"Today[’']s\s+Prayer\s+Times\b", text, re.I)
+    if not header:
+        raise ValueError("Andalus rendered page has no Today's Prayer Times widget")
+    region = text[header.end():header.end()+1500]
+    day_marker = re.search(
+        r"\b(Mon(?:day)?|Tue(?:sday)?|Wed(?:nesday)?|Thu(?:rsday)?|Fri(?:day)?|Sat(?:urday)?|Sun(?:day)?)"
+        r"\s*,?\s*0?(\d{1,2})\s+"
+        r"(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\b",
+        region[:280], re.I,
+    )
+    if not day_marker:
+        raise ValueError("Andalus widget doesn't expose a weekday/day/month for today's times")
+    day_name, dd, month_name = day_marker.groups()
+    if not (day_name.lower()[:3] == target.strftime('%a').lower()
+            and int(dd) == target.day
+            and month_name.lower()[:3] == target.strftime('%b').lower()):
+        raise ValueError(f"Andalus widget is dated {day_name} {dd} {month_name}, not {target.isoformat()}")
+    # Stay strictly inside this day's prayer table; avoid 'Next Prayer',
+    # Jumu'ah notices and footer entries with additional clock readings.
+    region = re.split(r"\bJumu[’']?ah\s+Friday\b|\bYears\s+Serving\b", region, maxsplit=1, flags=re.I)[0]
+    labels = {
+        'fajr': r'\bFajr\b', 'dhuhr': r'\bDhuhr\b',
+        'asr': r'\bAsr\b', 'maghrib': r'\bMaghrib\b', 'isha': r'\bIsha\b',
+    }
+    spans = []
+    for prayer in PRAYERS:
+        matches = list(re.finditer(labels[prayer], region, re.I))
+        if len(matches) != 1:
+            raise ValueError(f"Andalus has {len(matches)} labels for {prayer}; expected one")
+        spans.append((prayer, matches[0].start(), matches[0].end()))
+    if [x[1] for x in spans] != sorted(x[1] for x in spans):
+        raise ValueError("Andalus prayers are not in Fajr-to-Isha order")
+    adhan, iqamah = _empty(), _empty()
+    clock_re = r'(?<!\d)(\d{1,2}:\d{2}\s*(?:AM|PM))\b'
+    for idx, (prayer, _start, end) in enumerate(spans):
+        next_start = spans[idx+1][1] if idx+1 < len(spans) else len(region)
+        cell = region[end:next_start]
+        clocks = re.findall(clock_re, cell, re.I)
+        if len(clocks) != 2 or not re.search(r'\bIqam(?:a|ah)\b', cell, re.I):
+            raise ValueError(f"Andalus {prayer}: need two times and Iqamah label")
+        start, jamaat = (_clock(x) for x in clocks)
+        if start is None or jamaat is None:
+            raise ValueError(f"Andalus {prayer}: invalid clock")
+        adhan[prayer], iqamah[prayer] = start, jamaat
+    validate_times(adhan, iqamah)
+    return adhan, iqamah
+
+
+def _render_andalus_homepage() -> str:
+    """Run a locally installed Chrome/Chromium to render the public page.
+
+    ubuntu-latest GitHub-hosted runners usually include Google Chrome. No API
+    key, third-party proxy, Selenium dependency, or browser credential needed.
+    Any failure is treated as unavailable, never as a reason to invent times.
+    """
+    browser = next((shutil.which(name) for name in
+                    ('google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser')
+                    if shutil.which(name)), None)
+    if not browser:
+        raise RuntimeError("No Chrome/Chromium browser installed on the GitHub runner")
+    cmd = [browser, '--headless=new', '--no-sandbox', '--disable-gpu',
+           '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check',
+           '--lang=en-GB', '--virtual-time-budget=14000', '--dump-dom',
+           ANDALUS_OFFICIAL_URL]
+    environment = os.environ.copy()
+    environment['TZ'] = 'Europe/London'
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=35,
+                                env=environment, check=False)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("Chrome timed out rendering Andalus page") from exc
+    if result.returncode != 0 or not result.stdout.strip():
+        raise RuntimeError(f"Chrome failed to render Andalus: exit {result.returncode}")
+    if len(result.stdout) > 4_000_000:
+        raise ValueError("Andalus rendered page was unexpectedly large")
+    return result.stdout
+
+
+def _andalus_dated_screenshot(target: date) -> dict | None:
+    """31 October 2026 user-supplied screenshot. Never apply to later dates.
+
+    Screenshot is a dated observation of the official public website, not a
+    continuously fetched feed or an assertion of mosque administration approval.
+    """
+    if target != date(2026, 10, 31):
+        return None
+    mosque = next(m for m in MOSQUES if m['id'] == 'andalus')
+    record = _initial_record(mosque)
+    record.update(
+        adhan=dict(zip(PRAYERS, ('05:11', '11:50', '14:07', '16:39', '18:29'))),
+        iqamah=dict(zip(PRAYERS, ('06:00', '12:30', '14:45', '16:44', '19:00'))),
+        source_type='dated_website_screenshot', status='manual_dated',
+        source_date=target.isoformat(),
+        checked_at='2026-10-31T14:56:00+00:00',
+        updated_at='2026-10-31T14:56:00+00:00',
+        timetable_url=ANDALUS_OFFICIAL_URL,
+        note=('31 Oct 2026: times transcribed from a visitor-provided screenshot '
+              'of the official Andalus prayer timetable. Not a live feed; '
+              'confirm any subsequent timetable changes with the centre.'),
+        provenance='Screenshot of Andalus official site shared on 2026-10-31',
+    )
+    validate_times(record['adhan'], record['iqamah'])
+    return record
+
+
+def _read_andalus_official(mosque: dict, target: date) -> dict:
+    record = _initial_record(mosque)
+    record['checked_at'] = datetime.now(TZ).isoformat(timespec='seconds')
+    try:
+        html = _render_andalus_homepage()
+        adhan, iqamah = parse_andalus_rendered(html, target)
+        record.update(adhan=adhan, iqamah=iqamah, status='updated',
+                      source_type='official_rendered_daily_widget',
+                      source_date=target.isoformat(),
+                      updated_at=record['checked_at'],
+                      timetable_url=ANDALUS_OFFICIAL_URL,
+                      note='Five daily Adhan and Iqamah rows read from the official Andalus website using a JavaScript-capable browser.')
+        return record
+    except (RuntimeError, ValueError, OSError) as exc:
+        detail = f'{type(exc).__name__}: {str(exc)[:160]}'
+        LOG.warning('Andalus rendered prayer widget unavailable: %s', detail)
+        screenshot = _andalus_dated_screenshot(target)
+        if screenshot:
+            screenshot['diagnostic'] = f'Automatic website extraction unavailable: {detail}'
+            return screenshot
+        record['note'] = 'Official Andalus website displays a dynamic timetable, but this run could not read today’s five dated prayer/Iqamah pairs.'
+        record['diagnostic'] = detail
+        return _independent_or_manual(record, mosque, target)
+
+
 def _read_official(mosque: dict, target: date) -> dict:
+    if mosque["id"] == "andalus":
+        return _read_andalus_official(mosque, target)
     row = _initial_record(mosque)
     if not mosque["parser"]:
         row["note"] = ("لا يعرض موقع الأندلس مواقيت مؤرخة قابلة للقراءة الآلية حاليًا؛ يوجد رابط رسمي ومحاولة قراءة دليل مستقل مؤرخ."
