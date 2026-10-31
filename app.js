@@ -8,14 +8,62 @@ const PRAYERS = [
 ];
 const EMPTY = () => Object.fromEntries(PRAYERS.map(p => [p.key, null]));
 const DIRECTORY = [
-  {id:'huda',name_ar:'مسجد الهدى',name_en:'Al-Huda Islamic Centre',area:'Broomhall',address:'Hanover St, Sheffield S3 7WT',timetable_url:'https://masjidhudasheff.com/'},
-  {id:'sunnah',name_ar:'مسجد السنة',name_en:'Masjid Sunnah Sheffield',area:'Pitsmoor',address:'18 Kirk St, Sheffield S4 7JX',timetable_url:'https://masjidsunnahsheffield.co.uk/'},
-  {id:'mwh',name_ar:'مسجد بيت الرعاية الإسلامية',name_en:'Muslim Welfare House',area:'Broomhall',address:'10-12 Severn Rd, Sheffield S10 2SU',timetable_url:'https://www.mwhs.org.uk/'},
-  {id:'baitul',name_ar:'مسجد بيت المكرم',name_en:'Baitul Mukarram Jame Masjid',area:'Highfield',address:'358 London Rd, Sheffield S2 4NB',timetable_url:'https://www.baitulmukarramjamemasjid.com/'},
-  {id:'umar',name_ar:'مسجد عمر',name_en:'Masjid Umar (YMA)',area:'Pitsmoor',address:'306 Barnsley Rd, Sheffield S4 7AH',timetable_url:'https://www.ymasheffield.org/prayer-timetable'},
-  {id:'madina',name_ar:'مسجد المدينة',name_en:'Madina Masjid Sheffield',area:'Lowfield',address:'24 Wolseley Rd, Sheffield S8 0ZU',timetable_url:'https://mawaqit.net/en/madina-masjid-sheffield-sheffield-s8-0zu-united-kingdom'},
-  {id:'grand',name_ar:'مسجد شيفلد الكبير',name_en:'Sheffield Grand Mosque',area:'Grimesthorpe',address:'Grimesthorpe Rd, Sheffield S4 8DE',timetable_url:'https://emaantrust.mosqueprayertimes.org/prayer-times'},
-  {id:'industry',name_ar:'مسجد الجامع المركزي',name_en:'Markazi Jamia Mosque',area:'Darnall',address:'13 Industry Rd, Sheffield S9 5FP',timetable_url:'https://www.industryroadmosque.com/prayer-times/'}
+  {
+    "id": "huda",
+    "name_ar": "مسجد الهدى",
+    "name_en": "Al-Huda Islamic Centre",
+    "area": "Broomhall",
+    "address": "Hanover St, Sheffield S3 7WT",
+    "timetable_url": "https://masjidhudasheff.com/"
+  },
+  {
+    "id": "grand",
+    "name_ar": "مسجد شيفلد الكبير",
+    "name_en": "Sheffield Grand Mosque",
+    "area": "Grimesthorpe",
+    "address": "Grimesthorpe Rd, Sheffield S4 8DE",
+    "timetable_url": "https://emaantrust.mosqueprayertimes.org/prayer-times"
+  },
+  {
+    "id": "madina",
+    "name_ar": "مسجد المدينة",
+    "name_en": "Madina Masjid Sheffield",
+    "area": "Lowfield",
+    "address": "24 Wolseley Rd, Sheffield S8 0ZU",
+    "timetable_url": "https://mawaqit.net/en/madina-masjid-sheffield-sheffield-s8-0zu-united-kingdom"
+  },
+  {
+    "id": "risalah",
+    "name_ar": "مسجد الرسالة",
+    "name_en": "Al-Resala (Masjid Risalah)",
+    "area": "Netherthorpe",
+    "address": "51 Montgomery Terrace Rd, Sheffield S6 3BW",
+    "timetable_url": "https://mosqueprayertimes.org/prayer-times"
+  },
+  {
+    "id": "mwh",
+    "name_ar": "مسجد بيت الرعاية الإسلامية",
+    "name_en": "Muslim Welfare House",
+    "area": "Broomhall",
+    "address": "10-12 Severn Rd, Sheffield S10 2SU",
+    "timetable_url": "https://www.mwhs.org.uk/"
+  },
+  {
+    "id": "rahman",
+    "name_ar": "مسجد الرحمن",
+    "name_en": "Al-Rahman Mosque and Cultural Centre",
+    "area": "Burngreave",
+    "address": "9 Gower St, Sheffield S4 7HA",
+    "timetable_url": "https://alrahman.mosqueprayertimes.org/prayer-times"
+  },
+  {
+    "id": "sunnah",
+    "name_ar": "مسجد السنة",
+    "name_en": "Masjid Sunnah Sheffield",
+    "area": "Pitsmoor",
+    "address": "18 Kirk St, Sheffield S4 7JX",
+    "timetable_url": "https://masjidsunnahsheffield.co.uk/"
+  }
 ];
 const OFFLINE_MOSQUES = DIRECTORY.map(m => ({...m,adhan:EMPTY(),iqamah:EMPTY(),status:'needs_review',note:'المصدر الرسمي متاح عبر الرابط. بيانات النشر غير متوفرة.',source_date:null,checked_at:null}));
 const offlinePayload = {date:'',timezone:'Europe/London',generated_at:null,mosques:OFFLINE_MOSQUES};
@@ -132,7 +180,7 @@ function renderBanner(){
 }
 function renderTable(list,prayers){
   $('table-head').innerHTML=`<tr><th>المسجد والمنطقة</th>${prayers.map(p=>`<th>${p.label}</th>`).join('')}<th>المصدر</th></tr>`;
-  $('table-body').innerHTML=list.map(m=>`<tr><td><div class="masjid-name"><strong>${escapeHtml(m.name_ar)}</strong><span>${escapeHtml(m.name_en)}</span></div><span class="masjid-area">⌖ ${escapeHtml(m.area)}</span></td>${prayers.map(p=>`<td class="${state.prayer!=='all'?'focus-cell':''}">${formatCell(m,p.key)}</td>`).join('')}<td class="status-cell">${statusHtml(m)}<a class="source-link" href="${escapeHtml(safeUrl(m.timetable_url))}" target="_blank" rel="noopener noreferrer">المصدر الرسمي ↗</a><span class="source-small">${escapeHtml(sourceNote(m))}</span></td></tr>`).join('');
+  $('table-body').innerHTML=list.map(m=>`<tr><td><div class="masjid-name"><strong>${escapeHtml(m.name_ar)}</strong><span>${escapeHtml(m.name_en)}</span></div><span class="masjid-area">⌖ ${escapeHtml(m.area)}</span></td>${prayers.map(p=>`<td class="${state.prayer!=='all'?'focus-cell':''}">${formatCell(m,p.key)}</td>`).join('')}<td class="status-cell">${statusHtml(m)}<a class="source-link" href="${escapeHtml(safeUrl(m.timetable_url))}" target="_blank" rel="noopener noreferrer">المصدر الرسمي ↗</a><a class="source-link" href="${escapeHtml(mapLink(m))}" target="_blank" rel="noopener noreferrer">الموقع ⌖</a><span class="source-small">${escapeHtml(sourceNote(m))}</span></td></tr>`).join('');
 }
 function renderMobile(list,prayers){
   $('mobile-cards').innerHTML=list.map(m=>`<article class="masjid-card"><div class="masjid-card-head"><div><h3>${escapeHtml(m.name_ar)}</h3><div class="en-name">${escapeHtml(m.name_en)}</div><p class="area-name">⌖ ${escapeHtml(m.area)}</p></div>${statusHtml(m)}</div><div class="mobile-grid ${prayers.length===1?'focus-one':''}">${prayers.map(p=>`<div class="mobile-prayer ${state.prayer!=='all'?'is-focus':''}">${formatCell(m,p.key,true)}</div>`).join('')}</div><div class="card-footer"><div class="card-links"><a href="${escapeHtml(safeUrl(m.timetable_url))}" target="_blank" rel="noopener noreferrer">المصدر الرسمي ↗</a><a href="${escapeHtml(mapLink(m))}" target="_blank" rel="noopener noreferrer">الموقع ⌖</a></div><span class="source-small">${escapeHtml(m.source_type==='pdf'?'PDF':'موقع المسجد')}</span></div>${sourceNote(m)?`<p class="card-note">${escapeHtml(sourceNote(m))}</p>`:''}</article>`).join('');
@@ -177,6 +225,17 @@ async function refreshPublishedData(){
     const body=await response.json();
     if(body.demo===true || body.timezone!=='Europe/London' || !Array.isArray(body.mosques) ||
        !/^\d{4}-\d\d-\d\d$/.test(body.date || '') || !body.generated_at || body.mosques.length>250) throw new Error('Invalid data');
+    // Restrict display to the seven selected Sheffield mosques, in chosen order.
+    // The fallback rows remain visible if backend data has not yet caught up.
+    const records = new Map(body.mosques.map(m => [m.id,m]));
+    body.mosques = DIRECTORY.map(m => {
+      const live = records.get(m.id);
+      return live ? {...m, ...live, id:m.id, name_ar:m.name_ar, name_en:m.name_en,
+        area:m.area, address:m.address, timetable_url:live.timetable_url||m.timetable_url}
+        : {...m, adhan:EMPTY(), iqamah:EMPTY(), status:'not_connected',
+           source_date:null, checked_at:null, updated_at:null,
+           note:'يحتاج ربط جدول إقامة مؤرخ من المسجد.'};
+    });
     state.payload=body;state.offline=false;
   }catch(err){
     console.info('Published mosque times could not be retrieved:',err.message);
