@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import unicodedata
+from urllib.parse import urljoin, urlsplit
 
 import requests
 from bs4 import BeautifulSoup
@@ -78,13 +79,20 @@ def _empty() -> dict:
 
 def parse_huda(html: str, target: date) -> tuple[dict, dict]:
     text = _fold(_flat_html(html))
-    pos = text.lower().find("todays prayer times")
-    if pos < 0:
-        raise ValueError("Al-Huda time section not found")
-    region = text[pos : pos + 900]
+    marker = re.search(r"\btoday.?s\s+prayer\s+times\b", text, re.I)
+    if not marker:
+        raise ValueError("Al-Huda time section not found; site may now load times with JavaScript")
+    region = text[marker.end():marker.end() + 1800].split("Annual timetable", 1)[0]
     published = re.search(r"\b(\d{1,2}/\d{1,2}/\d{4})\b", region)
-    if not published or datetime.strptime(published.group(1), "%d/%m/%Y").date() != target:
-        raise ValueError("Al-Huda page date differs from London today")
+    named = re.search(r"\b(\d{1,2}\s+[A-Za-z]+\s+\d{4})\b", region)
+    if published:
+        source_day = datetime.strptime(published.group(1), "%d/%m/%Y").date()
+    elif named:
+        source_day = datetime.strptime(named.group(1), "%d %B %Y").date()
+    else:
+        raise ValueError("Al-Huda page date not found")
+    if source_day != target:
+        raise ValueError(f"Al-Huda source date {source_day.isoformat()} differs from London date {target.isoformat()}")
     adhan, iqamah = _empty(), _empty()
     aliases = {"fajr": "Fajr", "dhuhr": "(?:Dhuhr|Dhuhur|Zuhr)", "asr": "Asr", "maghrib": "Maghrib", "isha": "Isha"}
     for key, label in aliases.items():
@@ -92,7 +100,7 @@ def parse_huda(html: str, target: date) -> tuple[dict, dict]:
         if match:
             adhan[key], iqamah[key] = _clock(match.group(1)), _clock(match.group(2))
     if sum(bool(x) for x in iqamah.values()) < 4:
-        raise ValueError("Al-Huda parser found fewer than four iqamah times")
+        raise ValueError("Al-Huda parser found fewer than four iqamah times; page layout may have changed")
     return adhan, iqamah
 
 
@@ -233,7 +241,13 @@ def parse_industry(html: str, target: date) -> tuple[dict, dict]:
         match = re.search(rf"\b{label}\b\s+{web_time}\s+{web_time}", region, re.I)
         if match:
             adhan[prayer], iqamah[prayer] = _clock(match.group(1)), _clock(match.group(2))
-    if not all(adhan.values()) or not all(iqamah.values()):
+    if adhan["asr"] == "00:00":
+        # This official source has published midnight (12:00 am) as an
+        # obviously invalid Asr beginning. Do not publish its Asr row,
+        # but the remaining four rows can still be used if fully validated.
+        adhan["asr"] = None
+        iqamah["asr"] = None
+    if sum(bool(x) for x in adhan.values()) < 4 or sum(bool(x) for x in iqamah.values()) < 4:
         raise ValueError("Industry Road daily time rows incomplete")
     return adhan, iqamah
 
@@ -261,6 +275,55 @@ PARSERS: dict[str, Callable[[str, date], tuple[dict, dict]]] = {
 }
 
 
+def _official_html(url: str) -> str:
+    """Fetch HTTPS official page, permitting only safe same-domain redirects.
+
+    The old collector rejected even a normal / -> /home HTTP 301. This helper
+    allows up to 3 HTTPS redirects on the same registered host or its www alias.
+    It never follows a redirect to a different domain or a local network host.
+    """
+    origin = urlsplit(url)
+    expected_host = (origin.hostname or "").lower().removeprefix("www.")
+    if origin.scheme != "https" or not expected_host:
+        raise ValueError("Official source URL is not an HTTPS website")
+    current = url
+    visited = set()
+    for _ in range(4):
+        if current in visited:
+            raise ValueError("Source has a redirect loop")
+        visited.add(current)
+        response = requests.get(
+            current, timeout=(5, 12), allow_redirects=False,
+            headers={
+                "User-Agent": os.getenv("PORTAL_USER_AGENT", "SheffieldMasjidPortal/1.0 (public timetable checker)"),
+                "Accept": "text/html,application/xhtml+xml",
+                "Accept-Language": "en-GB,en;q=0.9",
+                "Cache-Control": "no-cache",
+            },
+        )
+        if response.status_code in (301, 302, 303, 307, 308):
+            location = response.headers.get("Location")
+            if not location:
+                raise ValueError(f"Source returned HTTP {response.status_code} without redirect destination")
+            target_url = urljoin(current, location)
+            target = urlsplit(target_url)
+            if (target.scheme != "https" or (target.hostname or "").lower().removeprefix("www.") != expected_host
+                    or target.username is not None or target.password is not None
+                    or target.port not in (None, 443)):
+                raise ValueError("Source redirected to a different domain or non-HTTPS URL")
+            current = target_url
+            continue
+        if response.status_code != 200:
+            raise ValueError(f"Official source returned HTTP {response.status_code}")
+        if len(response.content) > 2_000_000:
+            raise ValueError("Source HTML unexpectedly large")
+        content_type = response.headers.get("Content-Type", "text/html").split(";", 1)[0].strip().lower()
+        if content_type not in ("text/html", "application/xhtml+xml"):
+            raise ValueError(f"Official source returned {content_type} instead of HTML")
+        return response.text
+    raise ValueError("Official source redirected too many times")
+
+
 def _initial_record(mosque: dict) -> dict:
     row = {k: v for k, v in mosque.items() if k != "parser"}
     row.update(
@@ -277,25 +340,8 @@ def _read_official(mosque: dict, target: date) -> dict:
         return row
     row["checked_at"] = datetime.now(TZ).isoformat(timespec="seconds")
     try:
-        # Fixed, hard-coded URLs only; redirects are not followed, preventing a
-        # supposedly trusted endpoint from redirecting requests elsewhere.
-        response = requests.get(
-            mosque["timetable_url"],
-            timeout=(4, 10),
-            allow_redirects=False,
-            headers={
-                "User-Agent": os.getenv("PORTAL_USER_AGENT", "SheffieldMasjidPortal/0.2 (+public timetable viewer)"),
-                "Accept": "text/html,application/xhtml+xml",
-            },
-        )
-        if response.status_code != 200:
-            raise ValueError(f"Source returned HTTP {response.status_code}")
-        if len(response.content) > 2_000_000:
-            raise ValueError("Source document unexpectedly large")
-        media_type = response.headers.get("Content-Type", "text/html").split(";", 1)[0].strip().lower()
-        if media_type not in ("text/html", "application/xhtml+xml"):
-            raise ValueError("Source is not an HTML document")
-        adhan, iqamah = PARSERS[mosque["parser"]](response.text, target)
+        html = _official_html(mosque["timetable_url"])
+        adhan, iqamah = PARSERS[mosque["parser"]](html, target)
         validate_times(adhan, iqamah)
         row["adhan"], row["iqamah"] = adhan, iqamah
         if mosque["parser"] == "sunnah":
@@ -308,13 +354,18 @@ def _read_official(mosque: dict, target: date) -> dict:
             row["source_date"] = target.isoformat()
             if row["status"] == "partial":
                 row["note"] = "بعض مواعيد الإقامة غير منشورة كوقت محدد؛ لم نخمنها."
-                if mosque["parser"] == "mwh_home" and re.search(r"Iqamah\s+After Maghrib", response.text, re.I):
+                if mosque["parser"] == "mwh_home" and re.search(r"Iqamah\s+After Maghrib", html, re.I):
                     row["note"] = "موقع المسجد يذكر أن إقامة العشاء بعد المغرب دون ساعة محددة؛ لم نخمن وقتها."
+                if mosque["parser"] == "industry" and not iqamah.get("asr"):
+                    row["note"] = "وقت بداية العصر المنشور غير صحيح (منتصف الليل)؛ أخفينا العصر وعرضنا بقية الأوقات المؤرخة."
         row["updated_at"] = row["checked_at"]  # Compatibility with older UI.
     except (requests.RequestException, ValueError, RuntimeError, KeyError) as exc:
         LOG.warning("Unable to verify source %s: %s", mosque["id"], exc)
         row["status"] = "needs_review"
         row["note"] = "تعذر تأكيد المواعيد بتاريخ اليوم؛ راجع موقع المسجد الرسمي."
+        # Safe, short diagnostic to help the site owner identify the real issue.
+        # Visible only when examining data/mosques.json or the workflow logs.
+        row["diagnostic"] = f"{type(exc).__name__}: {str(exc).replace(chr(10), ' ')[:180]}"
     return row
 
 
