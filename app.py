@@ -48,9 +48,9 @@ MOSQUES = [{'id': 'huda',
   'area': 'Grimesthorpe',
   'address': 'Grimesthorpe Rd, Sheffield S4 8DE',
   'website': 'https://emaantrust.mosqueprayertimes.org/prayer-times',
-  'timetable_url': 'https://emaantrust.mosqueprayertimes.org/prayer-times',
-  'source_type': 'html',
-  'parser': 'mosque_times'},
+  'timetable_url': 'https://masjidbox.com/prayer-times/sheffield-grand-mosque-1696948767583',
+  'source_type': 'masjidbox_public_page',
+  'parser': 'grand_masjidbox'},
  {'id': 'madina',
   'name_ar': 'مسجد المدينة',
   'name_en': 'Madina Masjid Sheffield',
@@ -431,6 +431,97 @@ def parse_mosque_times_tables(html: str, target: date) -> tuple[dict, dict]:
     return adhan, iqamah
 
 
+
+
+def _parse_public_clock(segment: str) -> str | None:
+    """Interpret a single Masjidbox visible time such as '5 10 AM' or '2:30 PM'.
+
+    Do not use the city's calculated times; these values are attributed to the
+    selected mosque profile. A missing/ambiguous time is not guessed.
+    """
+    match = re.search(
+        r"(?<![\d])(?P<hour>\d{1,2})\s*(?:[:.]\s*|\s+)(?P<minute>\d{2})"
+        r"(?:\s*(?P<period>a\.?m\.?|p\.?m\.?))?(?![\d])",
+        segment, re.I,
+    )
+    if not match:
+        return None
+    hour = int(match.group('hour'))
+    minute = int(match.group('minute'))
+    if minute > 59:
+        return None
+    period = (match.group('period') or '').lower().replace('.', '')
+    if period:
+        if hour < 1 or hour > 12:
+            return None
+        hour = hour % 12 + (12 if period == 'pm' else 0)
+    elif hour > 23:
+        return None
+    return f'{hour:02d}:{minute:02d}'
+
+
+def parse_grand_masjidbox(html: str, target: date) -> tuple[dict, dict]:
+    """Read a dated publicly visible Sheffield Grand Mosque Masjidbox page.
+
+    Masjidbox has no public API. This parser uses only public page HTML and
+    fails closed if GitHub receives a JS shell, wrong mosque, wrong date,
+    different locale, or incomplete Jamaat times. No private endpoints.
+    """
+    soup = BeautifulSoup(html, 'html.parser')
+    for tag in soup(['script', 'style', 'noscript', 'svg']):
+        tag.decompose()
+    text = re.sub(r'\s+', ' ', soup.get_text(' ', strip=True))
+    if not re.search(r'\bSheffield Grand Mosque\b', text, re.I):
+        raise ValueError('Masjidbox mosque identity is not Sheffield Grand Mosque')
+    if not re.search(r'Grimesthorpe', text, re.I):
+        raise ValueError('Masjidbox mosque address could not be confirmed')
+    # Require a readable date printed near the PAGE HEADER; do not accept an
+    # unrelated date in a news story, embedded script or previous timetable.
+    header_text = text[:500]
+    match = re.search(
+        r'\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\s+'
+        r'(?P<month>January|February|March|April|May|June|July|August|September|October|November|December)'
+        r'\s+(?P<day>\d{1,2}),?\s+(?P<year>20\d{2})\b',
+        header_text, re.I,
+    )
+    if not match:
+        raise ValueError('Masjidbox public page has no visible English date')
+    date_string = f"{match.group('month').title()} {int(match.group('day'))} {match.group('year')}"
+    page_date = datetime.strptime(date_string, '%B %d %Y').date()
+    if page_date != target:
+        raise ValueError(f'Masjidbox page date {page_date} does not match {target}')
+    # Re-confirm the printed weekday, preventing a malformed header from
+    # silently being accepted just because day/month/year look plausible.
+    weekday = match.group(0).split(',', 1)[0].split()[0].lower()
+    if weekday != target.strftime('%A').lower():
+        raise ValueError('Masjidbox page weekday disagrees with its date')
+    prayer_aliases = [
+        ('fajr', r'Fajr'),
+        ('dhuhr', r'(?:Dhuhr|Zuhr|Dhuhur)'),
+        ('asr', r'Asr'),
+        ('maghrib', r'Maghrib'),
+        ('isha', r'(?:Isha|Ishaa)'),
+    ]
+    adhan, iqamah = _empty(), _empty()
+    # Constrain matching to the visible day's prayer card. Shuruq, Jumuah
+    # and countdown messages cannot be mistaken for daily Jamaat entries.
+    for prayer, alias in prayer_aliases:
+        search = re.search(
+            rf'\b{alias}\b(?P<begin>.*?)\bIqamah\b(?P<jam>.*?)'
+            rf'(?=\b(?:Fajr|Shuruq|Dhuhr|Zuhr|Dhuhur|Asr|Maghrib|Isha|Ishaa|Jumuah)\b|$)',
+            text, re.I | re.S,
+        )
+        if not search:
+            continue
+        begins = _parse_public_clock(search.group('begin'))
+        jamaat = _parse_public_clock(search.group('jam'))
+        if begins and jamaat:
+            adhan[prayer], iqamah[prayer] = begins, jamaat
+    if sum(bool(iqamah[p]) for p in PRAYERS) < 4:
+        raise ValueError('Masjidbox public page does not expose at least four dated Jamaat rows')
+    return adhan, iqamah
+
+
 def validate_times(adhan: dict, iqamah: dict) -> None:
     """Reject obvious HTML parsing errors instead of publishing odd times."""
     for prayer in PRAYERS:
@@ -452,6 +543,7 @@ PARSERS: dict[str, Callable[[str, date], tuple[dict, dict]]] = {
     "mwh_home": parse_mwh_home,
     "industry": parse_industry,
     "mosque_times": parse_mosque_times_tables,
+    "grand_masjidbox": parse_grand_masjidbox,
 }
 
 
@@ -559,6 +651,10 @@ def _read_official(mosque: dict, target: date) -> dict:
                     row["note"] = "موقع المسجد يذكر أن إقامة العشاء بعد المغرب دون ساعة محددة؛ لم نخمن وقتها."
                 if mosque["parser"] == "industry" and not iqamah.get("asr"):
                     row["note"] = "وقت بداية العصر المنشور غير صحيح (منتصف الليل)؛ أخفينا العصر وعرضنا بقية الأوقات المؤرخة."
+        if mosque["parser"] == "grand_masjidbox":
+            row["note"] = ("Public Masjidbox daily timetable for Sheffield Grand Mosque; "
+                           "the mosque should confirm that this is their current managed profile."
+                           + (" Some prayer rows were unavailable and left blank." if row["status"] == "partial" else ""))
         row["updated_at"] = row["checked_at"]  # Compatibility with older UI.
     except (requests.RequestException, ValueError, RuntimeError, KeyError) as exc:
         if mosque["id"] == "huda":
