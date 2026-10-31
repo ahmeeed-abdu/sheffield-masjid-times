@@ -36,3 +36,4 @@ python -m http.server 8000 --directory public
 The published output is `index.html`, `assets/`, and `data/mosques.json` — entirely static. There is no API server, no database, no paid service, and no secret/token required for GitHub Pages deployment.
 
 For more safety and troubleshooting information, see `README_AR.md`.
+Sheffield Masjid Times - Website deployment
