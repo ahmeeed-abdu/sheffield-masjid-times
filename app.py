@@ -49,8 +49,8 @@ MOSQUES = [{'id': 'huda',
   'address': 'Grimesthorpe Rd, Sheffield S4 8DE',
   'website': 'https://emaantrust.mosqueprayertimes.org/prayer-times',
   'timetable_url': 'https://emaantrust.mosqueprayertimes.org/prayer-times',
-  'source_type': 'dynamic',
-  'parser': None},
+  'source_type': 'html',
+  'parser': 'mosque_times'},
  {'id': 'madina',
   'name_ar': 'مسجد المدينة',
   'name_en': 'Madina Masjid Sheffield',
@@ -67,8 +67,8 @@ MOSQUES = [{'id': 'huda',
   'address': '51 Montgomery Terrace Rd, Sheffield S6 3BW',
   'website': 'https://mosqueprayertimes.org/prayer-times',
   'timetable_url': 'https://mosqueprayertimes.org/prayer-times',
-  'source_type': 'dynamic',
-  'parser': None},
+  'source_type': 'html',
+  'parser': 'mosque_times'},
  {'id': 'mwh',
   'name_ar': 'مسجد بيت الرعاية الإسلامية',
   'name_en': 'Muslim Welfare House',
@@ -85,8 +85,8 @@ MOSQUES = [{'id': 'huda',
   'address': '9 Gower St, Sheffield S4 7HA',
   'website': 'https://alrahman.mosqueprayertimes.org/prayer-times',
   'timetable_url': 'https://alrahman.mosqueprayertimes.org/prayer-times',
-  'source_type': 'dynamic',
-  'parser': None},
+  'source_type': 'html',
+  'parser': 'mosque_times'},
  {'id': 'sunnah',
   'name_ar': 'مسجد السنة',
   'name_en': 'Masjid Sunnah Sheffield',
@@ -173,6 +173,37 @@ def parse_sunnah(html: str, target: date) -> tuple[dict, dict]:
             adhan[key], iqamah[key] = _clock(found.group(1)), _clock(found.group(2))
     if sum(bool(x) for x in iqamah.values()) < 4:
         raise ValueError("Sunnah parser found fewer than four iqamah times")
+    return adhan, iqamah
+
+
+def parse_sunnah_dated(html: str, target: date) -> tuple[dict, dict]:
+    """Accept Sunnah's daily widget ONLY when it prints today's full date.
+
+    Their home-page summary has no effective date; some other pages embed a
+    widget that says 'Salah Times 30 October 2026' followed by a prayer table.
+    On Fridays the widget can show Jumuah rather than Dhuhr. We do not
+    confuse Jumuah with an ordinary Dhuhr iqamah.
+    """
+    text = _flat_html(html)
+    marker = re.search(r"\bSalah\s+Times\s+(\d{1,2}\s+[A-Za-z]+\s+\d{4})\b", text, re.I)
+    if not marker:
+        raise ValueError("Masjid Sunnah dated prayer widget not found")
+    try:
+        published = datetime.strptime(marker.group(1), "%d %B %Y").date()
+    except ValueError as exc:
+        raise ValueError("Masjid Sunnah date cannot be interpreted") from exc
+    if published != target:
+        raise ValueError(f"Masjid Sunnah widget is dated {published}, not {target}")
+    region = text[marker.end():marker.end()+850]
+    adhan, iqamah = _empty(), _empty()
+    aliases = {"fajr":"Fajr", "dhuhr":"(?:Dhuhr|Dhuhur|Zuhr)",
+               "asr":"Asr", "maghrib":"Maghrib", "isha":"Isha"}
+    for prayer, label in aliases.items():
+        match = re.search(rf"\b{label}\b\s+{TIME}\s+{TIME}", region, re.I)
+        if match:
+            adhan[prayer], iqamah[prayer] = _clock(match.group(1)), _clock(match.group(2))
+    if sum(bool(value) for value in iqamah.values()) < 4:
+        raise ValueError("Masjid Sunnah dated widget does not contain four Jamaat times")
     return adhan, iqamah
 
 
@@ -307,6 +338,99 @@ def parse_industry(html: str, target: date) -> tuple[dict, dict]:
     return adhan, iqamah
 
 
+def _day_cell_matches(value: str, target: date) -> bool:
+    """Match a table's date cell, never accepting an unrelated day's rows."""
+    value = " ".join(value.strip().split())
+    if not value:
+        return False
+    candidates = [
+        target.isoformat(),
+        target.strftime("%d/%m/%Y"),
+        target.strftime("%d-%m-%Y"),
+        target.strftime("%d-%b-%Y"),
+        target.strftime("%d %B %Y"),
+        target.strftime("%d %b %Y"),
+    ]
+    if any(re.search(r"(?<!\d)" + re.escape(c) + r"(?!\d)", value, re.I) for c in candidates):
+        return True
+    # A bare day number is accepted only when the site's month/year heading
+    # matches, and any printed weekday agrees with the target date.
+    day = re.fullmatch(rf"0?{target.day}(?:\s+((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)(?:day)?))?", value, re.I)
+    if not day:
+        return False
+    return not day.group(1) or day.group(1)[:3].lower() == target.strftime("%a").lower()
+
+
+def parse_mosque_times_tables(html: str, target: date) -> tuple[dict, dict]:
+    """Read only explicitly dated rows from a mosque's published tables.
+
+    Some mosqueprayertimes.org sites contain table HEADERS but no daily rows;
+    these must stay unavailable. Never infer prayers from a location's solar
+    timetable, or assume the first cell is today's day.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["script", "style", "noscript", "svg"]):
+        tag.decompose()
+    text = re.sub(r"\s+", " ", soup.get_text(" ", strip=True))
+    # This is essential when the site renders '31 Sat' rather than '31/10/2026'.
+    expected_month = target.strftime("%B")
+    month_heading = re.search(r"\b([A-Za-z]+)\s+Prayers\s+Times\s*\(?\s*(\d{4})\s*\)?", text, re.I)
+    month_verified = bool(month_heading and month_heading.group(1).lower() == expected_month.lower()
+                          and month_heading.group(2) == str(target.year))
+    if month_heading and not month_verified:
+        raise ValueError("Official timetable month or year does not match Sheffield today")
+    adhan, iqamah = _empty(), _empty()
+    aliases = {"fajr": "fajr", "dhuhr": "(?:dhuhr|dhuhur|zuhr)", "asr": "asr",
+               "maghrib": "maghrib", "isha": "(?:isha|ishaa)"}
+
+    for table in soup.find_all("table"):
+        trs = table.find_all("tr")
+        if len(trs) < 2:
+            continue
+        for pos, tr in enumerate(trs[:-1]):
+            heads = tr.find_all(["th", "td"], recursive=False)
+            header = [re.sub(r"\s+", " ", cell.get_text(" ", strip=True)).strip().lower()
+                      for cell in heads]
+            if not header or not re.search(r"\bdate\b", header[0]):
+                continue
+            # Separate iqamah table or prayer-start table. Use only exact
+            # clock columns for five named prayers, never sunrise/jumuah.
+            colmap = {}
+            for prayer, label in aliases.items():
+                possible = [i for i, key in enumerate(header) if re.fullmatch(
+                    rf"{label}(?:\s+iqamah|\s+jamaat|\s+jamah)?", key, re.I)]
+                if len(possible) == 1:
+                    colmap[prayer] = possible[0]
+            if len(colmap) < 4:
+                continue
+            is_iqamah = sum("iqamah" in c or "jamaat" in c or "jamah" in c for c in header) >= 3
+            # A table can contain multiple months; a fully dated row is allowed
+            # even without a month heading. Bare numbers require that heading.
+            for daily in trs[pos + 1:]:
+                cells = daily.find_all(["th", "td"], recursive=False)
+                if len(cells) <= max(colmap.values()):
+                    continue
+                date_str = cells[0].get_text(" ", strip=True)
+                if not _day_cell_matches(date_str, target):
+                    continue
+                if (re.fullmatch(r"0?\d{1,2}(?:\s+\w+)?", date_str)
+                    and not month_verified):
+                    continue
+                values = {}
+                for prayer, index in colmap.items():
+                    stamp = _clock(cells[index].get_text(" ", strip=True))
+                    if stamp:
+                        values[prayer] = stamp
+                if len(values) < 4:
+                    continue
+                destination = iqamah if is_iqamah else adhan
+                destination.update(values)
+                break
+    if sum(bool(v) for v in adhan.values()) < 4 or sum(bool(v) for v in iqamah.values()) < 4:
+        raise ValueError("Official mosque timetable page has no matching dated prayer and Jamaat rows")
+    return adhan, iqamah
+
+
 def validate_times(adhan: dict, iqamah: dict) -> None:
     """Reject obvious HTML parsing errors instead of publishing odd times."""
     for prayer in PRAYERS:
@@ -327,6 +451,7 @@ PARSERS: dict[str, Callable[[str, date], tuple[dict, dict]]] = {
     "sunnah": parse_sunnah,
     "mwh_home": parse_mwh_home,
     "industry": parse_industry,
+    "mosque_times": parse_mosque_times_tables,
 }
 
 
@@ -391,9 +516,30 @@ def _initial_record(mosque: dict) -> dict:
 def _read_official(mosque: dict, target: date) -> dict:
     row = _initial_record(mosque)
     if not mosque["parser"]:
-        row["note"] = "هذا المصدر غير مربوط آليًا بعد؛ تحقق من موقع المسجد الرسمي."
-        return row
+        row["note"] = ("هذه الصفحة دليل غير رسمي، ولا تؤكد أوقات الإقامة؛ اطلب جدول الجماعة من المسجد."
+                       if mosque["id"] == "risalah" else
+                       "هذا المصدر غير مربوط آليًا بعد؛ تحقق من موقع المسجد أو جدوله الرسمي.")
+        return _manual_or_row(row, mosque, target)
     row["checked_at"] = datetime.now(TZ).isoformat(timespec="seconds")
+    if mosque["id"] == "sunnah":
+        # These are explicit OFFICIAL daily widgets. A dated row on the home
+        # page is not guaranteed; try the known daily widget surfaces first.
+        for dated_url in ("https://masjidsunnahsheffield.co.uk/about/",
+                          "https://masjidsunnahsheffield.co.uk/contact/"):
+            try:
+                dated_html = _official_html(dated_url)
+                adhan, iqamah = parse_sunnah_dated(dated_html, target)
+                validate_times(adhan, iqamah)
+                row["adhan"], row["iqamah"] = adhan, iqamah
+                row["status"] = "updated" if all(iqamah.values()) else "partial"
+                row["source_date"] = target.isoformat()
+                row["timetable_url"] = dated_url
+                row["updated_at"] = row["checked_at"]
+                if row["status"] == "partial":
+                    row["note"] = "Official dated widget omits some prayers; Jumuah is not treated as daily Dhuhr."
+                return row
+            except (requests.RequestException, ValueError, RuntimeError) as exc:
+                LOG.info("Sunnah dated widget unavailable (%s): %s", dated_url, exc)
     try:
         html = _official_html(mosque["timetable_url"])
         adhan, iqamah = PARSERS[mosque["parser"]](html, target)
@@ -415,25 +561,28 @@ def _read_official(mosque: dict, target: date) -> dict:
                     row["note"] = "وقت بداية العصر المنشور غير صحيح (منتصف الليل)؛ أخفينا العصر وعرضنا بقية الأوقات المؤرخة."
         row["updated_at"] = row["checked_at"]  # Compatibility with older UI.
     except (requests.RequestException, ValueError, RuntimeError, KeyError) as exc:
-        if mosque["id"] == "huda" and "HTTP 403" in str(exc):
+        if mosque["id"] == "huda":
+            # The archived PDF row is only used when THIS EXACT DATE was
+            # independently confirmed. A source HTTP 403, timeout, or page
+            # change should not destroy a separately verified same-day row.
             try:
                 return _huda_pdf_fallback(mosque, target)
             except (ValueError, KeyError, OSError, json.JSONDecodeError) as fallback_exc:
-                # The downloaded PDF has no year. A missing verified date is
-                # a normal safe failure, not permission to guess a schedule.
-                LOG.warning("Al-Huda PDF not confirmed: %s", fallback_exc)
-                original_failure = f"HTTP 403; PDF fallback unavailable: {fallback_exc}"
-            else:
-                original_failure = str(exc)
+                LOG.warning("Al-Huda PDF cannot be used for this date: %s", fallback_exc)
+                original_failure = f"{exc}; verified PDF fallback unavailable: {fallback_exc}"
         else:
             original_failure = str(exc)
         LOG.warning("Unable to verify source %s: %s", mosque["id"], original_failure)
-        row["status"] = "needs_review"
-        row["note"] = "تعذر تأكيد المواعيد بتاريخ اليوم؛ راجع موقع المسجد الرسمي."
+        if mosque["parser"] == "mosque_times":
+            row["status"] = "not_connected"
+            row["note"] = "The mosque timetable page could not supply dated Jamaat rows; please ask the mosque for a dated timetable."
+        else:
+            row["status"] = "needs_review"
+            row["note"] = "تعذر تأكيد المواعيد بتاريخ اليوم؛ راجع موقع المسجد الرسمي."
         # Safe, short diagnostic to help the site owner identify the real issue.
         # Visible only when examining data/mosques.json or the workflow logs.
         row["diagnostic"] = f"{type(exc).__name__}: {original_failure.replace(chr(10), ' ')[:180]}"
-    return row
+    return _manual_or_row(row, mosque, target)
 
 
 
@@ -466,6 +615,86 @@ def _huda_pdf_fallback(mosque: dict, target: date) -> dict:
     row["source_type"] = "pdf_local_verified_date"
     row["note"] = "These daily times match the mosque's dated official website. The saved annual PDF is used because the live request returned HTTP 403."
     return row
+
+
+def _read_manual_confirmed(mosque: dict, target: date) -> dict | None:
+    """Read administrator-checked date-specific Jamaat rows from the repo.
+
+    This is NOT a feed and never infers dates, shifts BST/GMT or reuses the
+    last recorded day. Only a row for the precise Europe/London date can pass.
+    """
+    filename = ROOT / "verified_mosque_times.json"
+    if not filename.is_file():
+        return None  # Compatible with older deployments without this file.
+    data = json.loads(filename.read_text(encoding="utf-8"))
+    if data.get("schema_version") != 1:
+        raise ValueError("Unsupported verified timetable schema")
+    entry = data.get("mosques", {}).get(mosque["id"], {}).get("dates", {}).get(target.isoformat())
+    if entry is None:
+        return None
+    if not isinstance(entry, dict):
+        raise ValueError("Manual daily record must be an object")
+    confirmation = entry.get("confirmation_type")
+    if confirmation not in ("dated_mosque_timetable", "confirmed_with_mosque"):
+        raise ValueError("Manual row must declare how the mosque timetable was checked")
+    if len(str(entry.get("evidence", "")).strip()) < 10:
+        raise ValueError("Manual row needs a clear provenance note")
+    if len(str(entry.get("checked_by", "")).strip()) < 3:
+        raise ValueError("Manual row needs a checker attribution")
+    try:
+        checked_on = date.fromisoformat(str(entry["checked_on"]))
+    except (KeyError, ValueError) as exc:
+        raise ValueError("Manual row needs checked_on in YYYY-MM-DD format") from exc
+    if not (0 <= (target - checked_on).days <= 366):
+        raise ValueError("Manual timetable confirmation date is outside allowed period")
+    adhan = {p: entry.get("adhan", {}).get(p) for p in PRAYERS}
+    iqamah = {p: entry.get("iqamah", {}).get(p) for p in PRAYERS}
+    if not any(iqamah.values()):
+        raise ValueError("Manual row contains no Jamaat times")
+    # A real mosque may provide Jamaat-only timings without adhan begins.
+    # They are still useful and must not be replaced by calculated times.
+    for prayer in PRAYERS:
+        begins, congregation = adhan[prayer], iqamah[prayer]
+        if begins is not None and (not isinstance(begins, str) or _clock(begins) != begins):
+            raise ValueError(f"Invalid manual prayer start for {prayer}")
+        if congregation is not None and (not isinstance(congregation, str) or _clock(congregation) != congregation):
+            raise ValueError(f"Invalid manual Jamaat time for {prayer}")
+        if begins and congregation and _minutes(congregation) < _minutes(begins):
+            raise ValueError(f"Manual Jamaat before prayer start for {prayer}")
+    for series in (adhan, iqamah):
+        times = [series[p] for p in PRAYERS if series[p]]
+        if any(_minutes(b) <= _minutes(a) for a, b in zip(times, times[1:])):
+            raise ValueError("Manual timetable is not in chronological order")
+    source_url = entry.get("source_url") or mosque["timetable_url"]
+    url_parts = urlsplit(source_url)
+    if url_parts.scheme != "https" or not url_parts.hostname or url_parts.username:
+        raise ValueError("Manual timetable source must be an HTTPS web address")
+    row = _initial_record(mosque)
+    row.update(
+        adhan=adhan, iqamah=iqamah,
+        status="manual_dated" if all(iqamah.values()) else "manual_partial",
+        source_date=target.isoformat(),
+        source_type="administrator_checked_daily",
+        timetable_url=source_url,
+        checked_at=datetime.now(TZ).isoformat(timespec="seconds"),
+        updated_at=checked_on.isoformat(),
+        note="هذه مواعيد أدخلها مسؤول البوابة من جدول مؤرخ أو تأكيد مباشر؛ تأكد من المسجد عند حدوث تغييرات.",
+        confirmation_type=confirmation,
+        evidence=entry["evidence"].strip(),
+    )
+    return row
+
+
+def _manual_or_row(row: dict, mosque: dict, target: date) -> dict:
+    if row.get("status") in ("updated", "partial"):
+        return row  # Never supersede a working dated official source.
+    try:
+        manually_checked = _read_manual_confirmed(mosque, target)
+        return manually_checked if manually_checked is not None else row
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        LOG.warning("Invalid manually entered timetable for %s: %s", mosque["id"], exc)
+        row["diagnostic"] = f"Manual row rejected: {type(exc).__name__}: {str(exc)[:150]}"
+        return row
 
 
 _cache_lock = Lock()
