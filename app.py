@@ -1177,15 +1177,104 @@ def _manual_or_row(row: dict, mosque: dict, target: date) -> dict:
         return row
 
 
+# A same-date, time-limited safety net for temporary connection errors.
+# It can NEVER create a timetable for a source that has never succeeded, or
+# reuse the previous day's timetable. Keep original checked_at: the next build
+# cannot silently extend its validity.
+PREVIOUS_PUBLIC_URL = "https://ahmeeed-abdu.github.io/sheffield-masjid-times/data/mosques.json"
+MAX_RECOVERY_AGE = timedelta(hours=4)
+RECOVERABLE_STATUSES = {"updated", "partial", "third_party_dated", "third_party_partial"}
+
+
+def _previous_public_payload() -> dict | None:
+    try:
+        response = requests.get(
+            PREVIOUS_PUBLIC_URL,
+            timeout=(3, 7),
+            headers={"Accept": "application/json", "Cache-Control": "no-cache",
+                     "User-Agent": "SheffieldMasjidTimes/1.0 (same-day recovery)"},
+            allow_redirects=False,
+        )
+        if response.status_code != 200 or len(response.content) > 2_000_000:
+            return None
+        if "json" not in response.headers.get("Content-Type", "application/json").lower():
+            return None
+        result = response.json()
+        return result if isinstance(result, dict) else None
+    except (requests.RequestException, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _recover_same_day(rows: list[dict], snapshot: dict | None, target: date,
+                      now: datetime) -> list[dict]:
+    """Reuse a *verified earlier today* row for up to four hours, once.
+
+    This handles transient source outages (HTTP 403, timeout, SSL errors) but
+    never fills a permanently unconnected mosque or invents prayer times.
+    """
+    if not isinstance(snapshot, dict) or snapshot.get("date") != target.isoformat():
+        return rows
+    if snapshot.get("timezone") != "Europe/London" or snapshot.get("demo") is True:
+        return rows
+    previous_rows = snapshot.get("mosques")
+    if not isinstance(previous_rows, list) or len(previous_rows) > 100:
+        return rows
+    by_id = {x.get("id"): x for x in previous_rows if isinstance(x, dict)}
+    existing = {m["id"]: m for m in MOSQUES}
+    recovered = []
+    for current in rows:
+        if current.get("status") in RECOVERABLE_STATUSES or current.get("status") in (
+                "manual_dated", "manual_partial"):
+            recovered.append(current)
+            continue
+        old = by_id.get(current.get("id"))
+        mosque = existing.get(current.get("id"))
+        if (not old or not mosque or old.get("name_en") != mosque["name_en"]
+                or old.get("source_date") != target.isoformat()
+                or old.get("status") not in RECOVERABLE_STATUSES):
+            recovered.append(current)
+            continue
+        try:
+            stamp = datetime.fromisoformat(str(old["checked_at"]))
+            if stamp.tzinfo is None:
+                raise ValueError("Missing offset in source timestamp")
+            age = now - stamp.astimezone(TZ)
+            if not timedelta(0) <= age <= MAX_RECOVERY_AGE:
+                raise ValueError("Previously verified row is too old")
+            adhan, iqamah = old["adhan"], old["iqamah"]
+            if not isinstance(adhan, dict) or not isinstance(iqamah, dict):
+                raise ValueError("Bad snapshot time mapping")
+            validate_independent_times(adhan, iqamah)
+        except (KeyError, ValueError, TypeError):
+            recovered.append(current)
+            continue
+        row = copy.deepcopy(old)
+        row["status"] = ("cached_third_party_today" if old["status"].startswith("third_party")
+                         else "cached_official_today")
+        row["note"] = ("آخر مواقيت مؤرخة جرى فحصها اليوم. تعذّر تحديث المصدر الآن؛ "
+                       "تحقق من المسجد قبل الاعتماد عليها. لا تُستخدم بعد أربع ساعات من آخر فحص ناجح.")
+        if old["status"].startswith("third_party"):
+            row["note"] += " المصدر دليل مستقل وليس تأكيدًا من إدارة المسجد."
+        row["last_attempt_at"] = current.get("checked_at") or now.isoformat(timespec="seconds")
+        if current.get("diagnostic"):
+            row["diagnostic"] = current["diagnostic"]
+        # checked_at/updated_at remain from the ORIGINAL successful fetch.
+        recovered.append(row)
+    return recovered
+
+
 _cache_lock = Lock()
 _cache_data: dict | None = None
 _cache_until: datetime | None = None
 
 
 def build_payload() -> dict:
-    day = datetime.now(TZ).date()
+    now = datetime.now(TZ)
+    day = now.date()
+    previous = _previous_public_payload()
     with ThreadPoolExecutor(max_workers=3) as pool:
         rows = list(pool.map(lambda m: _read_official(m, day), MOSQUES))
+    rows = _recover_same_day(rows, previous, day, datetime.now(TZ))
     return {
         "date": day.isoformat(),
         "timezone": "Europe/London",

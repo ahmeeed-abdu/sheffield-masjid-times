@@ -109,6 +109,7 @@ const DIRECTORY = [
 const OFFLINE_MOSQUES = DIRECTORY.map(m => ({...m,adhan:EMPTY(),iqamah:EMPTY(),status:'needs_review',note:'المصدر الرسمي متاح عبر الرابط. بيانات النشر غير متوفرة.',source_date:null,checked_at:null}));
 const offlinePayload = {date:'',timezone:'Europe/London',generated_at:null,mosques:OFFLINE_MOSQUES};
 const MAX_DATA_AGE_MS = 5 * 60 * 60 * 1000; // three-hour scheduler plus margin
+const MAX_CACHED_SOURCE_AGE_MS = 4 * 60 * 60 * 1000; // never extend an old mosque check
 const state = {payload:offlinePayload, query:'', filter:'all', prayer:'all', mode:'iqamah', offline:true};
 const $ = id => document.getElementById(id);
 const escapeHtml = input => String(input ?? '').replace(/[&<>"']/g, x => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[x]));
@@ -124,8 +125,14 @@ function freshPublication(){
   const age = Date.now() - published;
   return Number.isFinite(published) && age >= -10*60*1000 && age <= MAX_DATA_AGE_MS;
 }
-const approvedRow = m => freshPublication() && m.source_date === state.payload.date &&
-  ['updated','partial','manual_dated','manual_partial','third_party_dated','third_party_partial'].includes(m.status);
+const cachedSourceFresh = m => {
+  if(!String(m.status||'').startsWith('cached_')) return true;
+  const checked = Date.parse(m.checked_at || '');
+  const age = Date.now() - checked;
+  return Number.isFinite(checked) && age >= -10*60*1000 && age <= MAX_CACHED_SOURCE_AGE_MS;
+};
+const approvedRow = m => freshPublication() && cachedSourceFresh(m) && m.source_date === state.payload.date &&
+  ['updated','partial','manual_dated','manual_partial','third_party_dated','third_party_partial','cached_official_today','cached_third_party_today'].includes(m.status);
 const hasTime = m => Object.values(m.iqamah || {}).some(Boolean);
 const usableRow = m => approvedRow(m) && hasTime(m);
 const clockFromISO = v => {const d = new Date(v||'');return Number.isNaN(d.getTime()) ? '' : londonTime(d);};
@@ -146,12 +153,14 @@ const statuses = {
   manual_partial:['جدول مؤكد جزئيًا','status-partial'],
   third_party_dated:['من دليل مستقل — تحقق','status-partial'],
   third_party_partial:['دليل مستقل جزئي — تحقق','status-partial'],
+  cached_official_today:['آخر فحص ناجح اليوم — تحقق','status-partial'],
+  cached_third_party_today:['دليل مستقل سابق اليوم — تحقق','status-partial'],
   undated:['جدول غير مؤرخ','status-partial'],
   needs_review:['بحاجة للتحقق','status-needs_review'],
   not_connected:['قيد الربط','status-not_connected']
 };
 function statusHtml(m){
-  const s = !freshPublication() && ['updated','partial','manual_dated','manual_partial','third_party_dated','third_party_partial'].includes(m.status) ?
+  const s = (!freshPublication() || !cachedSourceFresh(m)) && ['updated','partial','manual_dated','manual_partial','third_party_dated','third_party_partial','cached_official_today','cached_third_party_today'].includes(m.status) ?
     ['البيانات قديمة','status-needs_review'] : (statuses[m.status]||statuses.not_connected);
   return `<span class="status-badge ${s[1]}" title="${escapeHtml(m.note||'')}">${s[0]}</span>`;
 }
@@ -228,8 +237,28 @@ function renderBanner(){
   }else if(!state.payload.mosques.some(usableRow)){
     banner.textContent='لم تتوفر أوقات إقامة مؤرخة من أي مصدر حاليًا. يمكنك فتح مواقع المساجد الرسمية من الجدول.';
   }else{
-    banner.hidden=true;
+    // Six visible timetables out of twelve is source coverage, not a UI error.
+    // Tell visitors which mosques still lack date-confirmed Jamaat times.
+    const pending=state.payload.mosques.filter(m=>!usableRow(m));
+    if(!pending.length){banner.hidden=true;return;}
+    const available=state.payload.mosques.length-pending.length;
+    const signature=pending.map(m=>`${m.id}:${pendingReason(m)}`).join('|');
+    // Keep the detailed explanation collapsed on mobile. Do not recreate it
+    // each minute, otherwise a visitor's expanded details would close.
+    if(banner.dataset.coverage!==signature){
+      const details=pending.map(m=>`<li>${escapeHtml(m.name_ar)} — ${escapeHtml(pendingReason(m))}</li>`).join('');
+      banner.innerHTML=`المواعيد المؤرخة متاحة لـ ${available} من أصل ${state.payload.mosques.length} مسجدًا. بقية المساجد مدرجة لكن لم تتوفر أوقات إقامة مؤرخة قابلة للتحقق. <details><summary>لماذا لا تظهر مواعيد ${pending.length} مساجد؟</summary><ul>${details}</ul></details>`;
+      banner.dataset.coverage=signature;
+    }
   }
+}
+function pendingReason(m){
+  const diagnostic=String(m.diagnostic||'');
+  if(m.status==='undated')return 'الجدول غير مؤرخ';
+  if(/SSL|ConnectionError|HTTP 403|HTTP 429|timed?\s*out/i.test(diagnostic))return 'تعذّر الاتصال بالمصدر';
+  if(/date|month|year|dated/i.test(diagnostic))return 'التاريخ غير مؤكد';
+  if(m.status==='not_connected' && !m.checked_at)return 'لم يُنشر جدول مرتبط قابل للقراءة';
+  return 'لم تتوفر أوقات إقامة مؤرخة قابلة للتحقق';
 }
 function renderTable(list,prayers){
   $('table-head').innerHTML=`<tr><th>المسجد والمنطقة</th>${prayers.map(p=>`<th>${p.label}</th>`).join('')}<th>المصدر</th></tr>`;
