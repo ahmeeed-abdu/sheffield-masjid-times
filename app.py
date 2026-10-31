@@ -131,6 +131,15 @@ MOSQUES = [{'id': 'huda',
   'website': 'https://www.ymasheffield.org/',
   'timetable_url': 'https://www.ymasheffield.org/prayer-timetable',
   'source_type': 'official_pdf_link',
+  'parser': None},
+ {'id': 'andalus',
+  'name_ar': 'مركز الأندلس المجتمعي',
+  'name_en': 'Andalus Community Centre',
+  'area': 'Sheffield City Centre',
+  'address': '43 Townhead St, Sheffield S1 2EB',
+  'website': 'https://www.andalus.org.uk/',
+  'timetable_url': 'https://www.andalus.org.uk/',
+  'source_type': 'dynamic_prayer_widget',
   'parser': None}]
 
 
@@ -709,7 +718,66 @@ INDEPENDENT_SOURCES = {
     "umar": (
         ("masjid247", "https://www.masjid247.com/prayertimes/gbr/sheffield/masjid-umar-sheffield/monthly/2176"),
     ),
+    "andalus": (
+        # Independent mosque-specific page: date and congregation rows REQUIRED.
+        # The official Andalus homepage currently loads its times in JavaScript.
+        ("prayersconnect", "https://prayersconnect.com/mosques/82643226-andalus-community-center-sheffield-england-united-kingdom"),
+    ),
 }
+
+
+def parse_andalus_prayersconnect(html: str, target: date) -> tuple[dict, dict]:
+    """Parse a *dated* independent Andalus mosque entry, never city calculations.
+
+    Fail closed if the website returns a loading-only template, a stale date,
+    another mosque's schedule, or a table without 5 complete prayer+iqamah
+    pairs. This directory is NOT the mosque's official timetable.
+    """
+    text = _flat_html(html)
+    text = re.sub(r"[\u200e\u200f\u202a-\u202e]", "", text)
+    identity = text[:1800]
+    if not re.search(r"\bAndalus Community Cent(?:er|re)\b", identity, re.I):
+        raise ValueError("Andalus directory page identity does not match the centre")
+    if not re.search(r"43\s+Townhead\s+(?:St(?:reet)?\b)", identity, re.I) or not re.search(r"\bSheffield\b", identity, re.I):
+        raise ValueError("Andalus directory page address is not 43 Townhead Street, Sheffield")
+    schedule = re.search(r"\bPrayers\s+Schedule\b", text, re.I)
+    if not schedule:
+        raise ValueError("Andalus directory has no prayer schedule")
+    region = text[schedule.end():schedule.end()+1800]
+    dated = re.search(
+        r"\b(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\s+"
+        r"(January|February|March|April|May|June|July|August|September|October|November|December)\s+"
+        r"(\d{1,2}),?\s+(20\d{2})\b", region, re.I,
+    )
+    if not dated:
+        raise ValueError("Andalus independent schedule has no explicit day, month and year")
+    published = datetime.strptime(
+        f"{dated.group(3)} {dated.group(2)} {dated.group(4)}", "%d %B %Y"
+    ).date()
+    if published != target or dated.group(1).lower() != target.strftime('%A').lower():
+        raise ValueError(f"Andalus directory date {published} is not Sheffield today {target}")
+    region = region[dated.end():]
+    headings = re.search(r"\bPrayer\s+Name\s+Prayer\s+Time\s+Iqamah\s+Time\b", region, re.I)
+    if not headings:
+        raise ValueError("Andalus independent table has no prayer and iqamah columns")
+    region = region[headings.end():]
+    region = re.split(r"\b(?:Verified|Prediction|Unknown|Events in Mosque|Donate us)\b", region, maxsplit=1, flags=re.I)[0]
+    clock = r"(\d{1,2}:\d{2}\s*(?:AM|PM))"
+    labels = {"fajr": "Fajr", "dhuhr": "(?:Dhuhr|Zuhr)", "asr": "Asr",
+              "maghrib": "Maghrib", "isha": "(?:Isha|Ishaa)"}
+    adhan, iqamah = _empty(), _empty()
+    for prayer, label in labels.items():
+        # Arabic labels may appear between the English name and the clocks.
+        # Both clocks must be adjacent; a header/countdown cannot match.
+        regex = rf"(?<![A-Za-z])(?:{label})\b[^\d]{{0,35}}?{clock}\s+{clock}(?=\s|$)"
+        matches = list(re.finditer(regex, region, re.I))
+        if len(matches) != 1:
+            raise ValueError(f"Andalus independent table has no unique {prayer} prayer and iqamah pair")
+        start, jam = _clock(matches[0].group(1)), _clock(matches[0].group(2))
+        if not start or not jam:
+            raise ValueError(f"Andalus independent time format invalid for {prayer}")
+        adhan[prayer], iqamah[prayer] = start, jam
+    return adhan, iqamah
 
 
 def parse_faseela_dated(html: str, target: date, mosque_id: str) -> tuple[dict, dict]:
@@ -800,6 +868,8 @@ def _independent_or_manual(row: dict, mosque: dict, target: date) -> dict:
                 adhan, iqamah = parse_faseela_dated(html, target, mosque['id'])
             elif provider == 'masjid247':
                 adhan, iqamah = parse_umar_independent_monthly(html, target)
+            elif provider == 'prayersconnect':
+                adhan, iqamah = parse_andalus_prayersconnect(html, target)
             elif provider == 'city_listing':
                 adhan, iqamah = parse_city_mosque_jamaat(html, target, mosque['id'])
             else:
@@ -912,7 +982,9 @@ def _initial_record(mosque: dict) -> dict:
 def _read_official(mosque: dict, target: date) -> dict:
     row = _initial_record(mosque)
     if not mosque["parser"]:
-        row["note"] = ("لا تنشر صفحة دليل مسجد قباء جدولًا مؤرخًا للإقامة؛ نعرض الرابط والموقع فقط حتى يتوفر جدول معتمد."
+        row["note"] = ("لا يعرض موقع الأندلس مواقيت مؤرخة قابلة للقراءة الآلية حاليًا؛ يوجد رابط رسمي ومحاولة قراءة دليل مستقل مؤرخ."
+                       if mosque["id"] == "andalus" else
+                       "لا تنشر صفحة دليل مسجد قباء جدولًا مؤرخًا للإقامة؛ نعرض الرابط والموقع فقط حتى يتوفر جدول معتمد."
                        if mosque["id"] == "quba" else
                        "هذه الصفحة دليل غير رسمي، ولا تؤكد أوقات الإقامة؛ اطلب جدول الجماعة من المسجد."
                        if mosque["id"] == "risalah" else
