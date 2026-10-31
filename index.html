@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0e3134">
+  <meta name="description" content="بوابة تجريبية لجمع أوقات صلاة الجماعة في مساجد مدينة شيفلد من مصادر المساجد الرسمية.">
+  <title>مواقيت مساجد شيفلد | Sheffield Masjid Times</title>
+  <link rel="stylesheet" href="./assets/styles.css">
+</head>
+<body>
+  <div class="site-shell">
+    <header class="site-header">
+      <a class="brand" href="#top" aria-label="العودة إلى الصفحة الرئيسية">
+        <span class="brand-icon" aria-hidden="true">☪</span>
+        <span class="brand-text"><strong>مواقيت شيفلد</strong><small>Sheffield Masjid Times</small></span>
+      </a>
+      <div class="top-actions">
+        <a href="#about" class="top-link">كيف يعمل؟</a>
+        <span class="top-location"><span class="live-dot"></span> Sheffield, UK</span>
+      </div>
+    </header>
+
+    <main id="top">
+      <section class="hero" aria-labelledby="hero-heading">
+        <div class="hero-decor hero-decor-1" aria-hidden="true"></div>
+        <div class="hero-decor hero-decor-2" aria-hidden="true"></div>
+        <div class="hero-body">
+          <div class="hero-copy">
+            <div class="eyebrow"><span class="eyebrow-star">✦</span> دليلك إلى صلاة الجماعة في شيفلد</div>
+            <h1 id="hero-heading">مساجد كثيرة.<br><span>صفحة واحدة.</span></h1>
+            <p>قارن أوقات إقامة الصلاة في مساجد شيفلد، واعرف المسجد المناسب لك دون التنقل بين المواقع.</p>
+            <div class="hero-points"><span>✓ مقارنة واضحة</span><span>✓ المصادر الأصلية</span><span>✓ توقيت بريطانيا المحلي</span></div>
+          </div>
+          <div class="hero-clock">
+            <div class="clock-top"><span>التوقيت المحلي الآن</span><span class="small-star">✳</span></div>
+            <div id="london-clock" class="clock-time" aria-live="off">--:--</div>
+            <div class="clock-date" id="today-label">جارٍ تحديد التاريخ...</div>
+            <div class="clock-footer"><span class="clock-pin">⌖</span> Europe/London <span class="clock-pulse"></span></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="overview" aria-label="ملخص البوابة">
+        <div class="overview-stat"><div class="stat-symbol">▦</div><div><strong id="mosques-count">8</strong><span>مساجد في الدليل</span></div></div>
+        <div class="overview-stat"><div class="stat-symbol">◉</div><div><strong id="verified-count">—</strong><span>مساجد بمواعيد مؤرخة</span></div></div>
+        <div class="overview-stat next-stat"><div class="stat-symbol">◷</div><div><strong id="next-prayer">—</strong><span id="next-description">أقرب إقامة متاحة اليوم</span></div></div>
+      </section>
+
+      <section class="comparison-section" aria-labelledby="comparison-heading">
+        <div class="section-heading">
+          <div><div class="section-kicker">صلاتك أينما كنت</div><h2 id="comparison-heading">مواعيد الصلاة في المساجد</h2><p>اختر الصلاة أو ابحث عن المسجد أو المنطقة لتجد المواعيد بسهولة.</p></div>
+          <span id="source-status" class="global-status">جاري التحقق من المصادر</span>
+        </div>
+        <div id="information-banner" class="information-banner" role="status" aria-live="polite" hidden></div>
+
+        <div class="toolbar">
+          <label class="search-wrap"><span class="search-icon" aria-hidden="true">⌕</span><span class="sr-only">ابحث عن مسجد أو منطقة</span><input id="search" type="search" placeholder="ابحث عن اسم المسجد أو المنطقة..." autocomplete="off"></label>
+          <label class="select-wrap"><span class="sr-only">تصفية المصادر</span><select id="status-filter"><option value="all">كل المساجد</option><option value="available">بمواعيد متاحة</option><option value="pending">تحتاج إلى ربط أو تحقق</option></select></label>
+          <div class="mode-toggle" role="group" aria-label="نوع الوقت المعروض"><button id="mode-iqamah" class="active" type="button" aria-pressed="true">الإقامة</button><button id="mode-adhan" type="button" aria-pressed="false">دخول الصلاة</button></div>
+        </div>
+        <div class="prayer-filter" id="prayer-filter" role="group" aria-label="اختر الصلاة">
+          <button class="prayer-chip selected" data-prayer="all" type="button">جميع الصلوات</button>
+          <button class="prayer-chip" data-prayer="fajr" type="button">الفجر</button>
+          <button class="prayer-chip" data-prayer="dhuhr" type="button">الظهر</button>
+          <button class="prayer-chip" data-prayer="asr" type="button">العصر</button>
+          <button class="prayer-chip" data-prayer="maghrib" type="button">المغرب</button>
+          <button class="prayer-chip" data-prayer="isha" type="button">العشاء</button>
+        </div>
+        <div class="table-topline"><span id="results-label">جارٍ تحميل المساجد...</span><div class="table-actions"><span id="last-checked" class="last-checked"></span><button id="refresh-times" class="refresh-button" type="button">↻ تحميل أحدث نسخة</button></div></div>
+        <div class="table-shell">
+          <table class="masjid-table" id="mosque-table"><thead id="table-head"></thead><tbody id="table-body"><tr><td class="empty-state">جاري تحضير الجدول...</td></tr></tbody></table>
+        </div>
+        <div id="mobile-cards" class="mobile-cards"></div>
+        <div id="no-results" class="no-results" hidden>لا توجد مساجد تطابق البحث. جرّب اسمًا أو منطقة أخرى.</div>
+        <div class="under-table"><span>— يعني أن الموعد لم يتم التحقق منه أو لم ينشره المسجد.</span><span>تحديث آلي كل 3 ساعات تقريبًا؛ لا يمكن تسريع تحديث المسجد من هذا الزر.</span></div>
+      </section>
+
+      <section class="trust-section" id="about">
+        <div class="trust-intro"><span class="section-kicker">الشفافية أولًا</span><h2>من أين تأتي المواعيد؟</h2><p>هدفنا عرض المواعيد كما تعلنها إدارات المساجد، دون استبدالها بأوقات محسوبة للمدينة.</p></div>
+        <div class="trust-steps">
+          <article class="trust-item"><span class="trust-number">01</span><h3>المسجد هو المصدر</h3><p>نقرأ الصفحة أو الجدول الرسمي، ونحافظ على رابط المصدر لكل مسجد.</p></article>
+          <article class="trust-item"><span class="trust-number">02</span><h3>التحقق والتحديث</h3><p>نفحص المصادر آليًا عبر GitHub Actions كل 3 ساعات تقريبًا، لكن قد يتأخر التنفيذ. نُخفي النسخ القديمة.</p></article>
+          <article class="trust-item"><span class="trust-number">03</span><h3>لا نخمّن أوقات الإقامة</h3><p>إن كانت المواعيد غير منشورة أو تحتاج مراجعة، نوضح ذلك بدلًا من اختراع موعد.</p></article>
+        </div>
+      </section>
+      <aside class="important-note"><span aria-hidden="true">ⓘ</span><p><strong>تنبيه للمصلين:</strong> هذا الدليل غير معتمد من إدارات المساجد. قد تتغير أوقات الإقامة والجمعة في رمضان أو العطل أو عند تغيير التوقيت. قبل الذهاب لمسجد بعيد، تأكد من المصدر الرسمي. هذه نسخة أولية وليست خدمة معتمدة من المساجد. المواعيد المعروضة كما تنشرها المصادر ولا تعني موافقة إداراتها.</p></aside>
+    </main>
+    <footer class="site-footer"><div><strong>مواقيت شيفلد</strong><span>دليل مجتمعي تجريبي لمواعيد صلاة الجماعة</span></div><span>صُمم ليجمع المعلومات، لا ليحل محل إعلان المسجد.</span></footer>
+  </div>
+  <script src="./assets/app.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,53 @@
+name: Publish Sheffield mosque times (free)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    # Refresh at approximately 00:17, 03:17, ... London time.
+    # Avoid minute 0, which is a high-load time on GitHub Actions.
+    - cron: '17 */3 * * *'
+      timezone: 'Europe/London'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: sheffield-mosques-pages
+  cancel-in-progress: false
+
+jobs:
+  build-and-publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.publish.outputs.page_url }}
+    timeout-minutes: 10
+    steps:
+      - name: Download code
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Check date and parser safeguards
+        run: python -m unittest discover -s tests -v
+      - name: Collect mosque timetables and build static website
+        env:
+          PORTAL_USER_AGENT: 'SheffieldMasjidPortal/1.0 (https://github.com/${{ github.repository }})'
+        run: python scripts/build_static.py --output public
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+      - name: Upload only public static files
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: public
+      - name: Publish
+        uses: actions/deploy-pages@v4
+        id: publish
