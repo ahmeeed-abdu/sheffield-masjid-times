@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import unicodedata
 from urllib.parse import urljoin, urlsplit
 
@@ -1207,10 +1208,159 @@ def _read_official(mosque: dict, target: date) -> dict:
         # Safe, short diagnostic to help the site owner identify the real issue.
         # Visible only when examining data/mosques.json or the workflow logs.
         row["diagnostic"] = f"{type(exc).__name__}: {original_failure.replace(chr(10), ' ')[:180]}"
-    if mosque["id"] in INDEPENDENT_SOURCES and row["status"] not in ("updated", "partial"):
+    # Safe, browser-rendered attempt only when the ordinary HTTPS reader failed;
+    # do not touch sources already validated by the established collector.
+    if row["status"] in ("needs_review", "not_connected") and mosque["id"] in BROWSER_DAILY_SOURCES:
+        row = _try_browser_fallback(mosque, target, row)
+    if mosque["id"] in INDEPENDENT_SOURCES and row["status"] not in (
+            "updated", "partial", "third_party_dated", "third_party_partial"):
         return _independent_or_manual(row, mosque, target)
     return _manual_or_row(row, mosque, target)
 
+
+
+
+# A *secondary* browser-rendering attempt for public, mosque-specific daily
+# timetables. The existing HTML parsers remain the first choice, and already
+# working mosques are not rendered in a browser.
+#
+# The URLs and parsing strategies are fixed in source code. No user-controlled
+# URL, private APIs, authentication, proxy or disabled TLS verification.
+BROWSER_DAILY_SOURCES = {
+    'rahman': [
+        ('https://alrahman.mosqueprayertimes.org/prayer-times',
+         'mosque_times', 'official_rendered_daily_table'),
+    ],
+    'risalah': [
+        ('https://mosqueprayertimes.org/prayer-times',
+         'mosque_times', 'official_rendered_daily_table'),
+    ],
+    'baitul': [
+        ('https://www.baitulmukarramjamemasjid.com/',
+         'baitul_dated', 'official_rendered_daily_table'),
+    ],
+    'grand': [
+        # Prefer the official mosque's own dated table if it renders in Chrome.
+        ('https://emaantrust.mosqueprayertimes.org/prayer-times',
+         'mosque_times', 'official_rendered_daily_table'),
+        ('https://masjidbox.com/prayer-times/sheffield-grand-mosque-1696948767583',
+         'grand_masjidbox', 'masjidbox_rendered_daily_page'),
+    ],
+    'makki': [
+        ('https://masjidbox.com/prayer-times/makki',
+         'makki_masjidbox', 'masjidbox_rendered_daily_page'),
+    ],
+}
+
+_BROWSER_ALLOWED_URLS = frozenset(
+    url for sources in BROWSER_DAILY_SOURCES.values() for url, _, _ in sources
+)
+_BROWSER_LOCK = Lock()  # one Chrome at a time: prevent runner resource spikes
+
+
+def _render_public_timetable(url: str) -> str:
+    """Render a fixed public timetable page with JavaScript-enabled Chrome.
+
+    This is *not* a way to bypass HTTP 403, CAPTCHA or TLS verification. Chrome
+    must successfully load the ordinary public page and expose dated rows.
+    Limits on time, size and concurrency protect the free GitHub runner.
+    """
+    if url not in _BROWSER_ALLOWED_URLS:
+        raise ValueError('Browser source URL is not allowlisted')
+    executable = next((shutil.which(name) for name in
+                       ('google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser')
+                       if shutil.which(name)), None)
+    if not executable:
+        raise RuntimeError('Chrome/Chromium is not installed on this runner')
+    environment = os.environ.copy()
+    environment['TZ'] = 'Europe/London'
+    with _BROWSER_LOCK:
+        # A fresh browser profile isolates runs, avoids profile-lock failures,
+        # and never reuses any browser login or saved credentials.
+        with tempfile.TemporaryDirectory(prefix='masjid-public-timetable-') as profile:
+            arguments = [
+                executable, '--headless=new', '--no-sandbox',
+                '--disable-gpu', '--disable-dev-shm-usage',
+                '--no-first-run', '--no-default-browser-check', '--lang=en-GB',
+                '--virtual-time-budget=12000', '--dump-dom',
+                f'--user-data-dir={profile}', url,
+            ]
+            try:
+                completed = subprocess.run(
+                    arguments, capture_output=True, text=True, timeout=28,
+                    check=False, env=environment,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError('Browser timetable request timed out') from exc
+    if completed.returncode != 0 or not completed.stdout.strip():
+        raise RuntimeError(f'Chrome returned exit code {completed.returncode} or no HTML')
+    if len(completed.stdout) > 3_000_000:
+        raise ValueError('Browser timetable page is unexpectedly large')
+    return completed.stdout
+
+
+def _verify_rendered_mosque(mosque_id: str, html: str) -> None:
+    """Do not publish a similarly named or unrelated mosque timetable."""
+    text = _flat_html(html)[:7000]
+    requirements = {
+        'rahman': (r'Al[\s-]*Rahman\s+Mosque', r'(?:S4\s*7HA|Gower\s+Street)'),
+        'risalah': (r'(?:The\s+Message\s+Mosque|Message\s+Islamic\s+Information)',
+                    r'(?:S6\s*3BW|Montgomery\s+Terrace)'),
+        'baitul': (r'Baitul\s+Mukarram', r'(?:Sheffield|London\s+R(?:oa)?d)'),
+        'grand': (r'Sheffield\s+Grand\s+Mosque', r'(?:S4\s*8DE|Grimesthorpe)'),
+        'makki': (r'Makki\s+Mosque\s+Sheffield', r'(?:Plantation\s+Road|S8\s*9TH)'),
+    }
+    patterns = requirements.get(mosque_id)
+    if not patterns or not all(re.search(pattern, text, re.I) for pattern in patterns):
+        raise ValueError('Rendered page did not confirm the intended mosque and location')
+
+
+def _try_browser_fallback(mosque: dict, target: date, unsuccessful: dict) -> dict:
+    """Attempt only source-specific daily parsers, fail closed on errors.
+
+    Called only after an ordinary request fails. No previously successful row
+    is replaced. The caller retains the existing independent/manual fallbacks.
+    """
+    candidates = BROWSER_DAILY_SOURCES.get(mosque['id'])
+    if not candidates:
+        return unsuccessful
+    errors = []
+    for url, parser_name, source_type in candidates:
+        try:
+            html = _render_public_timetable(url)
+            _verify_rendered_mosque(mosque['id'], html)
+            adhan, iqamah = PARSERS[parser_name](html, target)
+            validate_times(adhan, iqamah)
+            status = 'updated' if all(iqamah.values()) else 'partial'
+            checked = datetime.now(TZ).isoformat(timespec='seconds')
+            result = _initial_record(mosque)
+            result.update(
+                adhan=adhan, iqamah=iqamah, status=status,
+                source_date=target.isoformat(), source_type=source_type,
+                timetable_url=url, checked_at=checked, updated_at=checked,
+                note=('Date-checked public timetable rendered in a browser. '
+                      'Times are attributed to the displayed mosque; '
+                      'confirm with the mosque if travelling.'),
+            )
+            if source_type == 'masjidbox_rendered_daily_page':
+                # Masjidbox profile ownership is not verified by the browser.
+                # Show it as an independent listing rather than official data.
+                result['status'] = ('third_party_dated' if all(iqamah.values())
+                                    else 'third_party_partial')
+                result['source_type'] = 'third_party_dated_listing'
+                result['note'] = ('Dated public Masjidbox timetable associated with this '
+                                  'Sheffield mosque; profile administration has not '
+                                  'been independently confirmed by the mosque.')
+                result['provenance'] = ('Public Masjidbox page rendered in a browser; '
+                                        'independent source, mosque approval unknown')
+            return result
+        except (OSError, RuntimeError, KeyError, ValueError) as exc:
+            errors.append(f'{parser_name}: {type(exc).__name__}: {str(exc)[:94]}')
+    unsuccessful['diagnostic'] = (
+        str(unsuccessful.get('diagnostic', '')) + ' | Browser fallback: ' +
+        ' | '.join(errors)
+    ).strip(' |')[:650]
+    return unsuccessful
 
 
 def _huda_pdf_fallback(mosque: dict, target: date) -> dict:
