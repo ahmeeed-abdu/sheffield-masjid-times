@@ -662,11 +662,39 @@ def parse_umar_independent_monthly(html: str, target: date) -> tuple[dict, dict]
     for tag in soup(['script','style','noscript','svg']):
         tag.decompose()
     text = re.sub(r'\s+', ' ', soup.get_text(' ', strip=True))
-    headline = re.search(r'\bMasjid Umar Sheffield\s+Prayer Timetable\s*[-–—:]\s*'
-                         r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+(20\d{2})\b', text, re.I)
-    if not headline:
-        raise ValueError('Masjid Umar independent monthly timetable identity/date heading missing')
-    if headline.group(1).lower()!=target.strftime('%B').lower() or int(headline.group(2))!=target.year:
+    # Masjid247 has served several heading variants: with or without a dash,
+    # or with a "for" before the month. Confirm mosque identity and BOTH the
+    # exact calendar month and year; never accept a generic Sheffield table.
+    month_names = (
+        'January|February|March|April|May|June|July|August|'
+        'September|October|November|December'
+    )
+    identity = re.search(r'\bMasjid[ -]+Umar[ -]+Sheffield\b', text, re.I)
+    if not identity:
+        raise ValueError('Masjid247 source identity does not match Masjid Umar Sheffield')
+    heading = re.search(
+        rf'\bMasjid[ -]+Umar[ -]+Sheffield\s+Prayer\s+Timetable'
+        rf'(?:\s*[-\u2013\u2014:|]\s*|\s+(?:for\s+)?)(?P<month>{month_names})\s+'
+        rf'(?P<year>20\d{{2}})\b',
+        text, re.I
+    )
+    if not heading:
+        # Some sites place month/year on a separate line next to the title.
+        # Limit the lookup to the immediate 160 characters AFTER the heading.
+        near_title = re.search(
+            r'\bMasjid[ -]+Umar[ -]+Sheffield\s+Prayer\s+Timetable\b',
+            text, re.I
+        )
+        if near_title:
+            region = text[near_title.end():near_title.end()+160]
+            heading = re.search(
+                rf'(?P<month>{month_names})\s+(?P<year>20\d{{2}})\b',
+                region, re.I
+            )
+    if not heading:
+        raise ValueError('Masjid247 page has no explicit monthly heading for Masjid Umar Sheffield')
+    if (heading.group('month').lower() != target.strftime('%B').lower()
+            or int(heading.group('year')) != target.year):
         raise ValueError('Masjid Umar independent month/year does not match London today')
     matched = []
     alias = {'fajr':'fajr','dhuhr':'dhuhr','asr':'asr','maghrib':'maghrib','isha':'isha'}
@@ -866,17 +894,36 @@ def _independent_or_manual(row: dict, mosque: dict, target: date) -> dict:
     failures = []
     for provider, url in INDEPENDENT_SOURCES.get(mosque['id'], ()):
         try:
-            html = _official_html(url)
-            if provider == 'faseela':
-                adhan, iqamah = parse_faseela_dated(html, target, mosque['id'])
-            elif provider == 'masjid247':
-                adhan, iqamah = parse_umar_independent_monthly(html, target)
-            elif provider == 'prayersconnect':
-                adhan, iqamah = parse_andalus_prayersconnect(html, target)
-            elif provider == 'city_listing':
-                adhan, iqamah = parse_city_mosque_jamaat(html, target, mosque['id'])
+            if provider == 'masjid247':
+                # Masjid247 can return an incomplete HTML shell to Python.
+                # Try a browser-rendered page ONLY if the strict table parser
+                # cannot read the ordinary HTML. Both paths still check a
+                # mosque-specific heading, exact year, month and target row.
+                try:
+                    html = _official_html(url)
+                    adhan, iqamah = parse_umar_independent_monthly(html, target)
+                except (requests.RequestException, ValueError) as direct_error:
+                    try:
+                        rendered = _render_public_timetable(url)
+                        _verify_rendered_mosque('umar', rendered)
+                        adhan, iqamah = parse_umar_independent_monthly(rendered, target)
+                    except (OSError, RuntimeError, KeyError, ValueError) as browser_error:
+                        raise ValueError(
+                            f'Masjid247 direct: {type(direct_error).__name__}: '
+                            f'{str(direct_error)[:70]}; browser: '
+                            f'{type(browser_error).__name__}: '
+                            f'{str(browser_error)[:70]}'
+                        ) from browser_error
             else:
-                raise ValueError('Unrecognized independent provider')
+                html = _official_html(url)
+                if provider == 'faseela':
+                    adhan, iqamah = parse_faseela_dated(html, target, mosque['id'])
+                elif provider == 'prayersconnect':
+                    adhan, iqamah = parse_andalus_prayersconnect(html, target)
+                elif provider == 'city_listing':
+                    adhan, iqamah = parse_city_mosque_jamaat(html, target, mosque['id'])
+                else:
+                    raise ValueError('Unrecognized independent provider')
             validate_independent_times(adhan, iqamah)
             provisional = _initial_record(mosque)
             provisional.update(
@@ -1254,6 +1301,8 @@ BROWSER_DAILY_SOURCES = {
 
 _BROWSER_ALLOWED_URLS = frozenset(
     url for sources in BROWSER_DAILY_SOURCES.values() for url, _, _ in sources
+) | frozenset(
+    url for name, url in INDEPENDENT_SOURCES.get('umar', ()) if name == 'masjid247'
 )
 _BROWSER_LOCK = Lock()  # one Chrome at a time: prevent runner resource spikes
 
@@ -1309,6 +1358,7 @@ def _verify_rendered_mosque(mosque_id: str, html: str) -> None:
         'baitul': (r'Baitul\s+Mukarram', r'(?:Sheffield|London\s+R(?:oa)?d)'),
         'grand': (r'Sheffield\s+Grand\s+Mosque', r'(?:S4\s*8DE|Grimesthorpe)'),
         'makki': (r'Makki\s+Mosque\s+Sheffield', r'(?:Plantation\s+Road|S8\s*9TH)'),
+        'umar': (r'Masjid\s+Umar\s+Sheffield', r'\bSheffield\b'),
     }
     patterns = requirements.get(mosque_id)
     if not patterns or not all(re.search(pattern, text, re.I) for pattern in patterns):
